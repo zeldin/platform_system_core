@@ -77,12 +77,8 @@ else
         abort_socket.c \
         fs.c \
         selector.c \
-        tztime.c \
         multiuser.c \
         zygote.c
-
-    commonHostSources += \
-        tzstrftime.c
 endif
 
 
@@ -158,3 +154,5 @@ LOCAL_SRC_FILES := str_parms.c hashmap.c memory.c
 LOCAL_SHARED_LIBRARIES := liblog
 LOCAL_MODULE_TAGS := optional
 include $(BUILD_EXECUTABLE)
+
+include $(call all-makefiles-under,$(LOCAL_PATH))
