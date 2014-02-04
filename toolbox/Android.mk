@@ -58,6 +58,7 @@ TOOLS := \
 	lsof \
 	du \
 	md5 \
+	clear \
 	getenforce \
 	setenforce \
 	chcon \
@@ -87,6 +88,7 @@ LOCAL_C_INCLUDES := bionic/libc/bionic
 
 LOCAL_SHARED_LIBRARIES := \
 	libcutils \
+	liblog \
 	libc \
 	libusbhost \
 	libselinux

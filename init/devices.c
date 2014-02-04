@@ -33,6 +33,7 @@
 #include <selinux/selinux.h>
 #include <selinux/label.h>
 #include <selinux/android.h>
+#include <selinux/avc.h>
 
 #include <private/android_filesystem_config.h>
 #include <sys/time.h>
@@ -451,6 +452,8 @@ static char **parse_platform_block_device(struct uevent *uevent)
     if (uevent->partition_name) {
         p = strdup(uevent->partition_name);
         sanitize(p);
+        if (strcmp(uevent->partition_name, p))
+            NOTICE("Linking partition '%s' as '%s'\n", uevent->partition_name, p);
         if (asprintf(&links[link_num], "%s/by-name/%s", link_path, p) > 0)
             link_num++;
         else
@@ -785,6 +788,7 @@ loading_close_out:
 file_free_out:
     free(file1);
     free(file2);
+    free(file3);
 data_free_out:
     free(data);
 loading_free_out:
@@ -826,6 +830,15 @@ void handle_device_fd()
 
         struct uevent uevent;
         parse_event(msg, &uevent);
+
+        if (sehandle && selinux_status_updated() > 0) {
+            struct selabel_handle *sehandle2;
+            sehandle2 = selinux_android_file_context_handle();
+            if (sehandle2) {
+                selabel_close(sehandle);
+                sehandle = sehandle2;
+            }
+        }
 
         handle_device_event(&uevent);
         handle_firmware_event(&uevent);
@@ -893,6 +906,7 @@ void device_init(void)
     sehandle = NULL;
     if (is_selinux_enabled() > 0) {
         sehandle = selinux_android_file_context_handle();
+        selinux_status_open(true);
     }
 
     /* is 256K enough? udev uses 16MB! */
