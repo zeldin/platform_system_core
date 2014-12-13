@@ -32,7 +32,7 @@
 #include <sys/wait.h>
 #include <linux/loop.h>
 #include <cutils/partition_utils.h>
-#include <sys/system_properties.h>
+#include <cutils/android_reboot.h>
 #include <fs_mgr.h>
 
 #include <selinux/selinux.h>
@@ -48,7 +48,7 @@
 
 #include <private/android_filesystem_config.h>
 
-void add_environment(const char *name, const char *value);
+int add_environment(const char *name, const char *value);
 
 extern int init_module(void *, unsigned long, const char *);
 
@@ -56,7 +56,7 @@ static int write_file(const char *path, const char *value)
 {
     int fd, ret, len;
 
-    fd = open(path, O_WRONLY|O_CREAT, 0622);
+    fd = open(path, O_WRONLY|O_CREAT|O_NOFOLLOW, 0600);
 
     if (fd < 0)
         return -errno;
@@ -195,6 +195,8 @@ static void service_start_if_not_disabled(struct service *svc)
 {
     if (!(svc->flags & SVC_DISABLED)) {
         service_start(svc, NULL);
+    } else {
+        svc->flags |= SVC_DISABLED_START;
     }
 }
 
@@ -237,6 +239,21 @@ int do_domainname(int nargs, char **args)
     return write_file("/proc/sys/kernel/domainname", args[1]);
 }
 
+int do_enable(int nargs, char **args)
+{
+    struct service *svc;
+    svc = service_find_by_name(args[1]);
+    if (svc) {
+        svc->flags &= ~(SVC_DISABLED | SVC_RC_DISABLED);
+        if (svc->flags & SVC_DISABLED_START) {
+            service_start(svc, NULL);
+        }
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
 int do_exec(int nargs, char **args)
 {
     return -1;
@@ -244,8 +261,7 @@ int do_exec(int nargs, char **args)
 
 int do_export(int nargs, char **args)
 {
-    add_environment(args[1], args[2]);
-    return 0;
+    return add_environment(args[1], args[2]);
 }
 
 int do_hostname(int nargs, char **args)
@@ -515,6 +531,18 @@ int do_mount_all(int nargs, char **args)
     return ret;
 }
 
+int do_swapon_all(int nargs, char **args)
+{
+    struct fstab *fstab;
+    int ret;
+
+    fstab = fs_mgr_read_fstab(args[1]);
+    ret = fs_mgr_swapon_all(fstab);
+    fs_mgr_free_fstab(fstab);
+
+    return ret;
+}
+
 int do_setcon(int nargs, char **args) {
     if (is_selinux_enabled() <= 0)
         return 0;
@@ -596,6 +624,43 @@ int do_restart(int nargs, char **args)
         service_restart(svc);
     }
     return 0;
+}
+
+int do_powerctl(int nargs, char **args)
+{
+    char command[PROP_VALUE_MAX];
+    int res;
+    int len = 0;
+    int cmd = 0;
+    char *reboot_target;
+
+    res = expand_props(command, args[1], sizeof(command));
+    if (res) {
+        ERROR("powerctl: cannot expand '%s'\n", args[1]);
+        return -EINVAL;
+    }
+
+    if (strncmp(command, "shutdown", 8) == 0) {
+        cmd = ANDROID_RB_POWEROFF;
+        len = 8;
+    } else if (strncmp(command, "reboot", 6) == 0) {
+        cmd = ANDROID_RB_RESTART2;
+        len = 6;
+    } else {
+        ERROR("powerctl: unrecognized command '%s'\n", command);
+        return -EINVAL;
+    }
+
+    if (command[len] == ',') {
+        reboot_target = &command[len + 1];
+    } else if (command[len] == '\0') {
+        reboot_target = "";
+    } else {
+        ERROR("powerctl: unrecognized reboot target '%s'\n", &command[len]);
+        return -EINVAL;
+    }
+
+    return android_reboot(cmd, 0, reboot_target);
 }
 
 int do_trigger(int nargs, char **args)
@@ -747,12 +812,24 @@ int do_chmod(int nargs, char **args) {
 
 int do_restorecon(int nargs, char **args) {
     int i;
+    int ret = 0;
 
     for (i = 1; i < nargs; i++) {
         if (restorecon(args[i]) < 0)
-            return -errno;
+            ret = -errno;
     }
-    return 0;
+    return ret;
+}
+
+int do_restorecon_recursive(int nargs, char **args) {
+    int i;
+    int ret = 0;
+
+    for (i = 1; i < nargs; i++) {
+        if (restorecon_recursive(args[i]) < 0)
+            ret = -errno;
+    }
+    return ret;
 }
 
 int do_setsebool(int nargs, char **args) {
@@ -784,16 +861,37 @@ int do_setsebool(int nargs, char **args) {
 }
 
 int do_loglevel(int nargs, char **args) {
-    if (nargs == 2) {
-        klog_set_level(atoi(args[1]));
-        return 0;
+    int log_level;
+    char log_level_str[PROP_VALUE_MAX] = "";
+    if (nargs != 2) {
+        ERROR("loglevel: missing argument\n");
+        return -EINVAL;
     }
-    return -1;
+
+    if (expand_props(log_level_str, args[1], sizeof(log_level_str))) {
+        ERROR("loglevel: cannot expand '%s'\n", args[1]);
+        return -EINVAL;
+    }
+    log_level = atoi(log_level_str);
+    if (log_level < KLOG_ERROR_LEVEL || log_level > KLOG_DEBUG_LEVEL) {
+        ERROR("loglevel: invalid log level'%d'\n", log_level);
+        return -EINVAL;
+    }
+    klog_set_level(log_level);
+    return 0;
 }
 
 int do_load_persist_props(int nargs, char **args) {
     if (nargs == 1) {
         load_persist_props();
+        return 0;
+    }
+    return -1;
+}
+
+int do_load_all_props(int nargs, char **args) {
+    if (nargs == 1) {
+        load_all_props();
         return 0;
     }
     return -1;

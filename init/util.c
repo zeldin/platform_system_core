@@ -25,6 +25,7 @@
 #include <ftw.h>
 
 #include <selinux/label.h>
+#include <selinux/android.h>
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -328,9 +329,9 @@ void sanitize(char *s)
     if (!s)
         return;
 
-    for (; *s; s++) {
+    while (*s) {
         s += strspn(s, accept);
-        if (*s) *s = '_';
+        if (*s) *s++ = '_';
     }
 }
 
@@ -405,7 +406,9 @@ void open_devnull_stdio(void)
 
 void get_hardware_name(char *hardware, unsigned int *revision)
 {
-    char data[1024];
+    const char *cpuinfo = "/proc/cpuinfo";
+    char *data = NULL;
+    size_t len = 0, limit = 1024;
     int fd, n;
     char *x, *hw, *rev;
 
@@ -413,14 +416,32 @@ void get_hardware_name(char *hardware, unsigned int *revision)
     if (hardware[0])
         return;
 
-    fd = open("/proc/cpuinfo", O_RDONLY);
+    fd = open(cpuinfo, O_RDONLY);
     if (fd < 0) return;
 
-    n = read(fd, data, 1023);
-    close(fd);
-    if (n < 0) return;
+    for (;;) {
+        x = realloc(data, limit);
+        if (!x) {
+            ERROR("Failed to allocate memory to read %s\n", cpuinfo);
+            goto done;
+        }
+        data = x;
 
-    data[n] = 0;
+        n = read(fd, data + len, limit - len);
+        if (n < 0) {
+            ERROR("Failed reading %s: %s (%d)\n", cpuinfo, strerror(errno), errno);
+            goto done;
+        }
+        len += n;
+
+        if (len < limit)
+            break;
+
+        /* We filled the buffer, so increase size and loop to read more */
+        limit *= 2;
+    }
+
+    data[len] = 0;
     hw = strstr(data, "\nHardware");
     rev = strstr(data, "\nRevision");
 
@@ -445,18 +466,22 @@ void get_hardware_name(char *hardware, unsigned int *revision)
             *revision = strtoul(x + 2, 0, 16);
         }
     }
+
+done:
+    close(fd);
+    free(data);
 }
 
 void import_kernel_cmdline(int in_qemu,
                            void (*import_kernel_nv)(char *name, int in_qemu))
 {
-    char cmdline[1024];
+    char cmdline[2048];
     char *ptr;
     int fd;
 
     fd = open("/proc/cmdline", O_RDONLY);
     if (fd >= 0) {
-        int n = read(fd, cmdline, 1023);
+        int n = read(fd, cmdline, sizeof(cmdline) - 1);
         if (n < 0) n = 0;
 
         /* get rid of trailing newline, it happens */
@@ -500,37 +525,12 @@ int make_dir(const char *path, mode_t mode)
     return rc;
 }
 
-int restorecon(const char *pathname)
+int restorecon(const char* pathname)
 {
-    char *secontext = NULL;
-    struct stat sb;
-    int i;
-
-    if (is_selinux_enabled() <= 0 || !sehandle)
-        return 0;
-
-    if (lstat(pathname, &sb) < 0)
-        return -errno;
-    if (selabel_lookup(sehandle, &secontext, pathname, sb.st_mode) < 0)
-        return -errno;
-    if (lsetfilecon(pathname, secontext) < 0) {
-        freecon(secontext);
-        return -errno;
-    }
-    freecon(secontext);
-    return 0;
-}
-
-static int nftw_restorecon(const char* filename, const struct stat* statptr,
-    int fileflags, struct FTW* pftw)
-{
-    restorecon(filename);
-    return 0;
+    return selinux_android_restorecon(pathname, 0);
 }
 
 int restorecon_recursive(const char* pathname)
 {
-    int fd_limit = 20;
-    int flags = FTW_DEPTH | FTW_MOUNT | FTW_PHYS;
-    return nftw(pathname, nftw_restorecon, fd_limit, flags);
+    return selinux_android_restorecon(pathname, SELINUX_ANDROID_RESTORECON_RECURSE);
 }

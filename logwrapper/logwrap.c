@@ -93,6 +93,7 @@ struct log_info {
     char klog_fmt[MAX_KLOG_TAG * 2];
     char *btag;
     bool abbreviated;
+    FILE *fp;
     struct abbr_buf a_buf;
 };
 
@@ -103,8 +104,6 @@ static void add_line_to_abbr_buf(struct abbr_buf *a_buf, char *linebuf, int line
 static int add_line_to_linear_buf(struct beginning_buf *b_buf,
                                    char *line, ssize_t line_len)
 {
-    size_t new_len;
-    char *new_buf;
     int full = 0;
 
     if ((line_len + b_buf->used_len) > b_buf->buf_size) {
@@ -123,7 +122,6 @@ static void add_line_to_circular_buf(struct ending_buf *e_buf,
 {
     ssize_t free_len;
     ssize_t needed_space;
-    char *new_buf;
     int cnt;
 
     if (e_buf->buf == NULL) {
@@ -158,10 +156,14 @@ static void add_line_to_circular_buf(struct ending_buf *e_buf,
 
 /* Log directly to the specified log */
 static void do_log_line(struct log_info *log_info, char *line) {
-    if (log_info->log_target == LOG_KLOG) {
+    if (log_info->log_target & LOG_KLOG) {
         klog_write(6, log_info->klog_fmt, line);
-    } else if (log_info->log_target == LOG_ALOG) {
+    }
+    if (log_info->log_target & LOG_ALOG) {
         ALOG(LOG_INFO, log_info->btag, "%s", line);
+    }
+    if (log_info->log_target & LOG_FILE) {
+        fprintf(log_info->fp, "%s\n", line);
     }
 }
 
@@ -187,7 +189,6 @@ static void print_buf_lines(struct log_info *log_info, char *buf, int buf_size)
 {
     char *line_start;
     char c;
-    int line_len;
     int i;
 
     line_start = buf;
@@ -290,7 +291,7 @@ static void print_abbr_buf(struct log_info *log_info) {
 }
 
 static int parent(const char *tag, int parent_read, pid_t pid,
-        int *chld_sts, int log_target, bool abbreviated) {
+        int *chld_sts, int log_target, bool abbreviated, char *file_path) {
     int status = 0;
     char buffer[4096];
     struct pollfd poll_fds[] = {
@@ -300,6 +301,7 @@ static int parent(const char *tag, int parent_read, pid_t pid,
         },
     };
     int rc = 0;
+    int fd;
 
     struct log_info log_info;
 
@@ -309,8 +311,6 @@ static int parent(const char *tag, int parent_read, pid_t pid,
     bool found_child = false;
     char tmpbuf[256];
 
-    log_info.log_target = log_target;
-    log_info.abbreviated = abbreviated;
     log_info.btag = basename(tag);
     if (!log_info.btag) {
         log_info.btag = (char*) tag;
@@ -323,10 +323,29 @@ static int parent(const char *tag, int parent_read, pid_t pid,
         init_abbr_buf(&log_info.a_buf);
     }
 
-    if (log_target == LOG_KLOG) {
+    if (log_target & LOG_KLOG) {
         snprintf(log_info.klog_fmt, sizeof(log_info.klog_fmt),
                  "<6>%.*s: %%s", MAX_KLOG_TAG, log_info.btag);
     }
+
+    if ((log_target & LOG_FILE) && !file_path) {
+        /* No file_path specified, clear the LOG_FILE bit */
+        log_target &= ~LOG_FILE;
+    }
+
+    if (log_target & LOG_FILE) {
+        fd = open(file_path, O_WRONLY | O_CREAT, 0664);
+        if (fd < 0) {
+            ERROR("Cannot log to file %s\n", file_path);
+            log_target &= ~LOG_FILE;
+        } else {
+            lseek(fd, 0, SEEK_END);
+            log_info.fp = fdopen(fd, "a");
+        }
+    }
+
+    log_info.log_target = log_target;
+    log_info.abbreviated = abbreviated;
 
     while (!found_child) {
         if (TEMP_FAILURE_RETRY(poll(poll_fds, ARRAY_SIZE(poll_fds), -1)) < 0) {
@@ -432,6 +451,9 @@ static int parent(const char *tag, int parent_read, pid_t pid,
 
 err_waitpid:
 err_poll:
+    if (log_target & LOG_FILE) {
+        fclose(log_info.fp); /* Also closes underlying fd */
+    }
     if (abbreviated) {
         free_abbr_buf(&log_info.a_buf);
     }
@@ -451,11 +473,10 @@ static void child(int argc, char* argv[]) {
 }
 
 int android_fork_execvp_ext(int argc, char* argv[], int *status, bool ignore_int_quit,
-        int log_target, bool abbreviated) {
+        int log_target, bool abbreviated, char *file_path) {
     pid_t pid;
     int parent_ptty;
     int child_ptty;
-    char *child_devname = NULL;
     struct sigaction intact;
     struct sigaction quitact;
     sigset_t blockset;
@@ -476,8 +497,9 @@ int android_fork_execvp_ext(int argc, char* argv[], int *status, bool ignore_int
         goto err_open;
     }
 
+    char child_devname[64];
     if (grantpt(parent_ptty) || unlockpt(parent_ptty) ||
-            ((child_devname = (char*)ptsname(parent_ptty)) == 0)) {
+            ptsname_r(parent_ptty, child_devname, sizeof(child_devname)) != 0) {
         ERROR("Problem with /dev/ptmx\n");
         rc = -1;
         goto err_ptty;
@@ -523,7 +545,8 @@ int android_fork_execvp_ext(int argc, char* argv[], int *status, bool ignore_int
             sigaction(SIGQUIT, &ignact, &quitact);
         }
 
-        rc = parent(argv[0], parent_ptty, pid, status, log_target, abbreviated);
+        rc = parent(argv[0], parent_ptty, pid, status, log_target,
+                    abbreviated, file_path);
     }
 
     if (ignore_int_quit) {

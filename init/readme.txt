@@ -123,15 +123,6 @@ boot
    Triggers of this form occur when the property <name> is set
    to the specific value <value>.
 
-device-added-<path>
-device-removed-<path>
-   Triggers of these forms occur when a device node is added
-   or removed.
-
-service-exited-<name>
-   Triggers of this form occur when the specified service exits.
-
-
 Commands
 --------
 
@@ -178,6 +169,16 @@ class_stop <serviceclass>
 domainname <name>
    Set the domain name.
 
+enable <servicename>
+   Turns a disabled service into an enabled one as if the service did not
+   specify disabled.
+   If the service is supposed to be running, it will be started now.
+   Typically used when the bootloader sets a variable that indicates a specific
+   service should be started when needed. E.g.
+     on property:ro.boot.myfancyhardware=1
+        enable my_fancy_service_for_my_fancy_hardware
+
+
 insmod <path>
    Install the module at <path>
 
@@ -192,11 +193,15 @@ mount <type> <device> <dir> [ <mountoption> ]*
    device by name.
    <mountoption>s include "ro", "rw", "remount", "noatime", ...
 
-restorecon <path>
+restorecon <path> [ <path> ]*
    Restore the file named by <path> to the security context specified
    in the file_contexts configuration.
    Not required for directories created by the init.rc as these are
    automatically labeled correctly by init.
+
+restorecon_recursive <path> [ <path> ]*
+   Recursively restore the directory tree named by <path> to the
+   security contexts specified in the file_contexts configuration.
 
 setcon <securitycontext>
    Set the current process security context to the specified string.
@@ -241,9 +246,9 @@ wait <path> [ <timeout> ]
   or the timeout has been reached. If timeout is not specified it
   currently defaults to five seconds.
 
-write <path> <string> [ <string> ]*
-   Open the file at <path> and write one or more strings
-   to it with write(2)
+write <path> <string>
+   Open the file at <path> and write a string to it with write(2)
+   without appending.
 
 
 Properties
@@ -310,12 +315,6 @@ service zygote /system/bin/app_process -Xzygote /system/bin --zygote
 service runtime /system/bin/runtime
    user system
    group system
-
-on device-added-/dev/compass
-   start akmd
-
-on device-removed-/dev/compass
-   stop akmd
 
 service akmd /sbin/akmd
    disabled

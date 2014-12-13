@@ -18,9 +18,10 @@ include $(CLEAR_VARS)
 
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/../mkbootimg \
   $(LOCAL_PATH)/../../extras/ext4_utils
-LOCAL_SRC_FILES := protocol.c engine.c bootimg.c fastboot.c
+LOCAL_SRC_FILES := protocol.c engine.c bootimg.c fastboot.c util.c fs.c
 LOCAL_MODULE := fastboot
 LOCAL_MODULE_TAGS := debug
+LOCAL_CFLAGS += -std=gnu99 -Werror
 
 ifeq ($(HOST_OS),linux)
   LOCAL_SRC_FILES += usb_linux.c util_linux.c
@@ -30,6 +31,7 @@ ifeq ($(HOST_OS),darwin)
   LOCAL_SRC_FILES += usb_osx.c util_osx.c
   LOCAL_LDLIBS += -lpthread -framework CoreFoundation -framework IOKit \
 	-framework Carbon
+  LOCAL_CFLAGS += -Wno-unused-parameter
 endif
 
 ifeq ($(HOST_OS),windows)
@@ -69,8 +71,9 @@ $(call dist-for-goals,dist_files sdk,$(LOCAL_BUILT_MODULE))
 
 ifeq ($(HOST_OS),linux)
 include $(CLEAR_VARS)
-LOCAL_SRC_FILES := usbtest.c usb_linux.c
+LOCAL_SRC_FILES := usbtest.c usb_linux.c util.c
 LOCAL_MODULE := usbtest
+LOCAL_CFLAGS := -Werror
 include $(BUILD_HOST_EXECUTABLE)
 endif
 

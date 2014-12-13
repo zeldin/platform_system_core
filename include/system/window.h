@@ -22,10 +22,16 @@
 #include <limits.h>
 #include <stdint.h>
 #include <string.h>
-#include <sync/sync.h>
 #include <sys/cdefs.h>
 #include <system/graphics.h>
 #include <unistd.h>
+
+#ifndef __UNUSED
+#define __UNUSED __attribute__((__unused__))
+#endif
+#ifndef __deprecated
+#define __deprecated __attribute__((__deprecated__))
+#endif
 
 __BEGIN_DECLS
 
@@ -90,10 +96,10 @@ typedef struct ANativeWindowBuffer
 
     // Implement the methods that sp<ANativeWindowBuffer> expects so that it
     // can be used to automatically refcount ANativeWindowBuffer's.
-    void incStrong(const void* id) const {
+    void incStrong(const void* /*id*/) const {
         common.incRef(const_cast<android_native_base_t*>(&common));
     }
-    void decStrong(const void* id) const {
+    void decStrong(const void* /*id*/) const {
         common.decRef(const_cast<android_native_base_t*>(&common));
     }
 #endif
@@ -230,7 +236,13 @@ enum {
      * Boolean that indicates whether the consumer is running more than
      * one buffer behind the producer.
      */
-    NATIVE_WINDOW_CONSUMER_RUNNING_BEHIND = 9
+    NATIVE_WINDOW_CONSUMER_RUNNING_BEHIND = 9,
+
+    /*
+     * The consumer gralloc usage bits currently set by the consumer.
+     * The values are defined in hardware/libhardware/include/gralloc.h.
+     */
+    NATIVE_WINDOW_CONSUMER_USAGE_BITS = 10
 };
 
 /* Valid operations for the (*perform)() hook.
@@ -290,12 +302,15 @@ enum {
     NATIVE_WINDOW_TRANSFORM_FLIP_H = HAL_TRANSFORM_FLIP_H ,
     /* flip source image vertically */
     NATIVE_WINDOW_TRANSFORM_FLIP_V = HAL_TRANSFORM_FLIP_V,
-    /* rotate source image 90 degrees clock-wise */
+    /* rotate source image 90 degrees clock-wise, and is applied after TRANSFORM_FLIP_{H|V} */
     NATIVE_WINDOW_TRANSFORM_ROT_90 = HAL_TRANSFORM_ROT_90,
     /* rotate source image 180 degrees */
     NATIVE_WINDOW_TRANSFORM_ROT_180 = HAL_TRANSFORM_ROT_180,
     /* rotate source image 270 degrees clock-wise */
     NATIVE_WINDOW_TRANSFORM_ROT_270 = HAL_TRANSFORM_ROT_270,
+    /* transforms source by the inverse transform of the screen it is displayed onto. This
+     * transform is applied last */
+    NATIVE_WINDOW_TRANSFORM_INVERSE_DISPLAY = 0x08
 };
 
 /* parameter for NATIVE_WINDOW_SET_SCALING_MODE */
@@ -344,10 +359,10 @@ struct ANativeWindow
 
     /* Implement the methods that sp<ANativeWindow> expects so that it
        can be used to automatically refcount ANativeWindow's. */
-    void incStrong(const void* id) const {
+    void incStrong(const void* /*id*/) const {
         common.incRef(const_cast<android_native_base_t*>(&common));
     }
-    void decStrong(const void* id) const {
+    void decStrong(const void* /*id*/) const {
         common.decRef(const_cast<android_native_base_t*>(&common));
     }
 #endif
@@ -574,7 +589,7 @@ struct ANativeWindow
   * android_native_window_t is deprecated.
   */
 typedef struct ANativeWindow ANativeWindow;
-typedef struct ANativeWindow android_native_window_t;
+typedef struct ANativeWindow android_native_window_t __deprecated;
 
 /*
  *  native_window_set_usage(..., usage)
@@ -595,13 +610,19 @@ static inline int native_window_set_usage(
 
 /* deprecated. Always returns 0. Don't call. */
 static inline int native_window_connect(
-        struct ANativeWindow* window, int api) {
+        struct ANativeWindow* window __UNUSED, int api __UNUSED) __deprecated;
+
+static inline int native_window_connect(
+        struct ANativeWindow* window __UNUSED, int api __UNUSED) {
     return 0;
 }
 
 /* deprecated. Always returns 0. Don't call. */
 static inline int native_window_disconnect(
-        struct ANativeWindow* window, int api) {
+        struct ANativeWindow* window __UNUSED, int api __UNUSED) __deprecated;
+
+static inline int native_window_disconnect(
+        struct ANativeWindow* window __UNUSED, int api __UNUSED) {
     return 0;
 }
 
@@ -656,6 +677,10 @@ static inline int native_window_set_post_transform_crop(
  */
 static inline int native_window_set_active_rect(
         struct ANativeWindow* window,
+        android_native_rect_t const * active_rect) __deprecated;
+
+static inline int native_window_set_active_rect(
+        struct ANativeWindow* window,
         android_native_rect_t const * active_rect)
 {
     return native_window_set_post_transform_crop(window, active_rect);
@@ -681,6 +706,10 @@ static inline int native_window_set_buffer_count(
  * XXX: This function is deprecated.  The native_window_set_buffers_dimensions
  * and native_window_set_buffers_format functions should be used instead.
  */
+static inline int native_window_set_buffers_geometry(
+        struct ANativeWindow* window,
+        int w, int h, int format) __deprecated;
+
 static inline int native_window_set_buffers_geometry(
         struct ANativeWindow* window,
         int w, int h, int format)

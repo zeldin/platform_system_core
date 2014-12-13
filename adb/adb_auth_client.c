@@ -25,6 +25,7 @@
 #include "adb_auth.h"
 #include "fdevent.h"
 #include "mincrypt/rsa.h"
+#include "mincrypt/sha.h"
 
 #define TRACE_TAG TRACE_AUTH
 
@@ -56,7 +57,7 @@ static void read_keys(const char *file, struct listnode *list)
     char *sep;
     int ret;
 
-    f = fopen(file, "r");
+    f = fopen(file, "re");
     if (!f) {
         D("Can't open '%s'\n", file);
         return;
@@ -125,7 +126,7 @@ int adb_auth_generate_token(void *token, size_t token_size)
     FILE *f;
     int ret;
 
-    f = fopen("/dev/urandom", "r");
+    f = fopen("/dev/urandom", "re");
     if (!f)
         return 0;
 
@@ -149,7 +150,7 @@ int adb_auth_verify(void *token, void *sig, int siglen)
 
     list_for_each(item, &key_list) {
         key = node_to_item(item, struct adb_public_key, node);
-        ret = RSA_verify(&key->key, sig, siglen, token);
+        ret = RSA_verify(&key->key, sig, siglen, token, SHA_DIGEST_SIZE);
         if (ret)
             break;
     }
@@ -256,6 +257,7 @@ void adb_auth_init(void)
         D("Failed to get adbd socket\n");
         return;
     }
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
 
     ret = listen(fd, 4);
     if (ret < 0) {

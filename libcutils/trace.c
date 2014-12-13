@@ -28,7 +28,14 @@
 #include <cutils/trace.h>
 
 #define LOG_TAG "cutils-trace"
-#include <cutils/log.h>
+#include <log/log.h>
+
+/**
+ * Maximum size of a message that can be logged to the trace buffer.
+ * Note this message includes a tag, the pid, and the string given as the name.
+ * Names should be kept short to get the most use of the trace buffer.
+ */
+#define ATRACE_MESSAGE_LENGTH 1024
 
 volatile int32_t        atrace_is_ready      = 0;
 int                     atrace_marker_fd     = -1;
@@ -86,7 +93,6 @@ static bool atrace_is_cmdline_match(const char* cmdline)
 static bool atrace_is_app_tracing_enabled()
 {
     bool sys_debuggable = false;
-    bool proc_debuggable = false;
     char value[PROPERTY_VALUE_MAX];
     bool result = false;
 
@@ -183,4 +189,54 @@ done:
 void atrace_setup()
 {
     pthread_once(&atrace_once_control, atrace_init_once);
+}
+
+void atrace_begin_body(const char* name)
+{
+    char buf[ATRACE_MESSAGE_LENGTH];
+    size_t len;
+
+    len = snprintf(buf, ATRACE_MESSAGE_LENGTH, "B|%d|%s", getpid(), name);
+    write(atrace_marker_fd, buf, len);
+}
+
+
+void atrace_async_begin_body(const char* name, int32_t cookie)
+{
+    char buf[ATRACE_MESSAGE_LENGTH];
+    size_t len;
+
+    len = snprintf(buf, ATRACE_MESSAGE_LENGTH, "S|%d|%s|%" PRId32,
+            getpid(), name, cookie);
+    write(atrace_marker_fd, buf, len);
+}
+
+void atrace_async_end_body(const char* name, int32_t cookie)
+{
+    char buf[ATRACE_MESSAGE_LENGTH];
+    size_t len;
+
+    len = snprintf(buf, ATRACE_MESSAGE_LENGTH, "F|%d|%s|%" PRId32,
+            getpid(), name, cookie);
+    write(atrace_marker_fd, buf, len);
+}
+
+void atrace_int_body(const char* name, int32_t value)
+{
+    char buf[ATRACE_MESSAGE_LENGTH];
+    size_t len;
+
+    len = snprintf(buf, ATRACE_MESSAGE_LENGTH, "C|%d|%s|%" PRId32,
+            getpid(), name, value);
+    write(atrace_marker_fd, buf, len);
+}
+
+void atrace_int64_body(const char* name, int64_t value)
+{
+    char buf[ATRACE_MESSAGE_LENGTH];
+    size_t len;
+
+    len = snprintf(buf, ATRACE_MESSAGE_LENGTH, "C|%d|%s|%" PRId64,
+            getpid(), name, value);
+    write(atrace_marker_fd, buf, len);
 }

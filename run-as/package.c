@@ -90,7 +90,7 @@ map_file(const char* filename, size_t* filesize)
      */
 
     oldegid = getegid();
-    if (setegid(AID_SYSTEM) < 0) {
+    if (setegid(AID_PACKAGE_INFO) < 0) {
         return NULL;
     }
 
@@ -111,7 +111,7 @@ map_file(const char* filename, size_t* filesize)
         goto EXIT;
 
     /* Ensure that the file is owned by the system user */
-    if ((st.st_uid != AID_SYSTEM) || (st.st_gid != AID_SYSTEM)) {
+    if ((st.st_uid != AID_SYSTEM) || (st.st_gid != AID_PACKAGE_INFO)) {
         goto EXIT;
     }
 
@@ -128,7 +128,9 @@ map_file(const char* filename, size_t* filesize)
     }
 
     /* Memory-map the file now */
-    address = TEMP_FAILURE_RETRY(mmap(NULL, length, PROT_READ, MAP_PRIVATE, fd, 0));
+    do {
+        address = mmap(NULL, length, PROT_READ, MAP_PRIVATE, fd, 0);
+    } while (address == MAP_FAILED && errno == EINTR);
     if (address == MAP_FAILED) {
         address = NULL;
         goto EXIT;
@@ -408,10 +410,6 @@ parse_positive_decimal(const char** pp, const char* end)
         value = -1;
     }
     return value;
-
-BAD:
-    *pp = p;
-    return -1;
 }
 
 /* Read the system's package database and extract information about

@@ -23,6 +23,11 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/icmp6.h>
+#include <arpa/inet.h>
+#include <net/if.h>
+
 #include <linux/if.h>
 #include <linux/netfilter/nfnetlink.h>
 #include <linux/netfilter_ipv4/ipt_ULOG.h>
@@ -38,6 +43,9 @@ const int NetlinkEvent::NlActionRemove = 2;
 const int NetlinkEvent::NlActionChange = 3;
 const int NetlinkEvent::NlActionLinkUp = 4;
 const int NetlinkEvent::NlActionLinkDown = 5;
+const int NetlinkEvent::NlActionAddressUpdated = 6;
+const int NetlinkEvent::NlActionAddressRemoved = 7;
+const int NetlinkEvent::NlActionRdnss = 8;
 
 NetlinkEvent::NetlinkEvent() {
     mAction = NlActionUnknown;
@@ -70,13 +78,208 @@ void NetlinkEvent::dump() {
 }
 
 /*
- * Parse an binary message from a NETLINK_ROUTE netlink socket.
+ * Parse a RTM_NEWADDR or RTM_DELADDR message.
+ */
+bool NetlinkEvent::parseIfAddrMessage(int type, struct ifaddrmsg *ifaddr,
+                                      int rtasize) {
+    struct rtattr *rta;
+    struct ifa_cacheinfo *cacheinfo = NULL;
+    char addrstr[INET6_ADDRSTRLEN] = "";
+
+    // Sanity check.
+    if (type != RTM_NEWADDR && type != RTM_DELADDR) {
+        SLOGE("parseIfAddrMessage on incorrect message type 0x%x\n", type);
+        return false;
+    }
+
+    // For log messages.
+    const char *msgtype = (type == RTM_NEWADDR) ? "RTM_NEWADDR" : "RTM_DELADDR";
+
+    for (rta = IFA_RTA(ifaddr); RTA_OK(rta, rtasize);
+         rta = RTA_NEXT(rta, rtasize)) {
+        if (rta->rta_type == IFA_ADDRESS) {
+            // Only look at the first address, because we only support notifying
+            // one change at a time.
+            if (*addrstr != '\0') {
+                SLOGE("Multiple IFA_ADDRESSes in %s, ignoring\n", msgtype);
+                continue;
+            }
+
+            // Convert the IP address to a string.
+            if (ifaddr->ifa_family == AF_INET) {
+                struct in_addr *addr4 = (struct in_addr *) RTA_DATA(rta);
+                if (RTA_PAYLOAD(rta) < sizeof(*addr4)) {
+                    SLOGE("Short IPv4 address (%zu bytes) in %s",
+                          RTA_PAYLOAD(rta), msgtype);
+                    continue;
+                }
+                inet_ntop(AF_INET, addr4, addrstr, sizeof(addrstr));
+            } else if (ifaddr->ifa_family == AF_INET6) {
+                struct in6_addr *addr6 = (struct in6_addr *) RTA_DATA(rta);
+                if (RTA_PAYLOAD(rta) < sizeof(*addr6)) {
+                    SLOGE("Short IPv6 address (%zu bytes) in %s",
+                          RTA_PAYLOAD(rta), msgtype);
+                    continue;
+                }
+                inet_ntop(AF_INET6, addr6, addrstr, sizeof(addrstr));
+            } else {
+                SLOGE("Unknown address family %d\n", ifaddr->ifa_family);
+                continue;
+            }
+
+            // Find the interface name.
+            char ifname[IFNAMSIZ + 1];
+            if (!if_indextoname(ifaddr->ifa_index, ifname)) {
+                SLOGE("Unknown ifindex %d in %s", ifaddr->ifa_index, msgtype);
+                return false;
+            }
+
+            // Fill in interface information.
+            mAction = (type == RTM_NEWADDR) ? NlActionAddressUpdated :
+                                              NlActionAddressRemoved;
+            mSubsystem = strdup("net");
+            asprintf(&mParams[0], "ADDRESS=%s/%d", addrstr,
+                     ifaddr->ifa_prefixlen);
+            asprintf(&mParams[1], "INTERFACE=%s", ifname);
+            asprintf(&mParams[2], "FLAGS=%u", ifaddr->ifa_flags);
+            asprintf(&mParams[3], "SCOPE=%u", ifaddr->ifa_scope);
+        } else if (rta->rta_type == IFA_CACHEINFO) {
+            // Address lifetime information.
+            if (cacheinfo) {
+                // We only support one address.
+                SLOGE("Multiple IFA_CACHEINFOs in %s, ignoring\n", msgtype);
+                continue;
+            }
+
+            if (RTA_PAYLOAD(rta) < sizeof(*cacheinfo)) {
+                SLOGE("Short IFA_CACHEINFO (%zu vs. %zu bytes) in %s",
+                      RTA_PAYLOAD(rta), sizeof(cacheinfo), msgtype);
+                continue;
+            }
+
+            cacheinfo = (struct ifa_cacheinfo *) RTA_DATA(rta);
+            asprintf(&mParams[4], "PREFERRED=%u", cacheinfo->ifa_prefered);
+            asprintf(&mParams[5], "VALID=%u", cacheinfo->ifa_valid);
+            asprintf(&mParams[6], "CSTAMP=%u", cacheinfo->cstamp);
+            asprintf(&mParams[7], "TSTAMP=%u", cacheinfo->tstamp);
+        }
+    }
+
+    if (addrstr[0] == '\0') {
+        SLOGE("No IFA_ADDRESS in %s\n", msgtype);
+        return false;
+    }
+
+    return true;
+}
+
+/*
+ * Parse a RTM_NEWNDUSEROPT message.
+ */
+bool NetlinkEvent::parseNdUserOptMessage(struct nduseroptmsg *msg, int len) {
+    // Check the length is valid.
+    if (msg->nduseropt_opts_len > len) {
+        SLOGE("RTM_NEWNDUSEROPT invalid length %d > %d\n",
+              msg->nduseropt_opts_len, len);
+        return false;
+    }
+    len = msg->nduseropt_opts_len;
+
+    // Check address family and packet type.
+    if (msg->nduseropt_family != AF_INET6) {
+        SLOGE("RTM_NEWNDUSEROPT message for unknown family %d\n",
+              msg->nduseropt_family);
+        return false;
+    }
+
+    if (msg->nduseropt_icmp_type != ND_ROUTER_ADVERT ||
+        msg->nduseropt_icmp_code != 0) {
+        SLOGE("RTM_NEWNDUSEROPT message for unknown ICMPv6 type/code %d/%d\n",
+              msg->nduseropt_icmp_type, msg->nduseropt_icmp_code);
+        return false;
+    }
+
+    // Find the interface name.
+    char ifname[IFNAMSIZ + 1];
+    if (!if_indextoname(msg->nduseropt_ifindex, ifname)) {
+        SLOGE("RTM_NEWNDUSEROPT on unknown ifindex %d\n",
+              msg->nduseropt_ifindex);
+        return false;
+    }
+
+    // The kernel sends a separate netlink message for each ND option in the RA.
+    // So only parse the first ND option in the message.
+    struct nd_opt_hdr *opthdr = (struct nd_opt_hdr *) (msg + 1);
+
+    // The length is in multiples of 8 octets.
+    uint16_t optlen = opthdr->nd_opt_len;
+    if (optlen * 8 > len) {
+        SLOGE("Invalid option length %d > %d for ND option %d\n",
+              optlen * 8, len, opthdr->nd_opt_type);
+        return false;
+    }
+
+    if (opthdr->nd_opt_type == ND_OPT_RDNSS) {
+        // DNS Servers (RFC 6106).
+        // Each address takes up 2*8 octets, and the header takes up 8 octets.
+        // So for a valid option with one or more addresses, optlen must be
+        // odd and greater than 1.
+        if ((optlen < 3) || !(optlen & 0x1)) {
+            SLOGE("Invalid optlen %d for RDNSS option\n", optlen);
+            return false;
+        }
+        int numaddrs = (optlen - 1) / 2;
+
+        // Find the lifetime.
+        struct nd_opt_rdnss *rndss_opt = (struct nd_opt_rdnss *) opthdr;
+        uint32_t lifetime = ntohl(rndss_opt->nd_opt_rdnss_lifetime);
+
+        // Construct "SERVERS=<comma-separated string of DNS addresses>".
+        // Reserve (INET6_ADDRSTRLEN + 1) chars for each address: all but the
+        // the last address are followed by ','; the last is followed by '\0'.
+        static const char kServerTag[] = "SERVERS=";
+        static const int kTagLength = sizeof(kServerTag) - 1;
+        int bufsize = kTagLength + numaddrs * (INET6_ADDRSTRLEN + 1);
+        char *buf = (char *) malloc(bufsize);
+        if (!buf) {
+            SLOGE("RDNSS option: out of memory\n");
+            return false;
+        }
+        strcpy(buf, kServerTag);
+        int pos = kTagLength;
+
+        struct in6_addr *addrs = (struct in6_addr *) (rndss_opt + 1);
+        for (int i = 0; i < numaddrs; i++) {
+            if (i > 0) {
+                buf[pos++] = ',';
+            }
+            inet_ntop(AF_INET6, addrs + i, buf + pos, bufsize - pos);
+            pos += strlen(buf + pos);
+        }
+        buf[pos] = '\0';
+
+        mAction = NlActionRdnss;
+        mSubsystem = strdup("net");
+        asprintf(&mParams[0], "INTERFACE=%s", ifname);
+        asprintf(&mParams[1], "LIFETIME=%u", lifetime);
+        mParams[2] = buf;
+    } else {
+        SLOGD("Unknown ND option type %d\n", opthdr->nd_opt_type);
+        return false;
+    }
+
+    return true;
+}
+
+/*
+ * Parse a binary message from a NETLINK_ROUTE netlink socket.
  */
 bool NetlinkEvent::parseBinaryNetlinkMessage(char *buffer, int size) {
-    size_t sz = size;
-    const struct nlmsghdr *nh = (struct nlmsghdr *) buffer;
+    const struct nlmsghdr *nh;
 
-    while (NLMSG_OK(nh, sz) && (nh->nlmsg_type != NLMSG_DONE)) {
+    for (nh = (struct nlmsghdr *) buffer;
+         NLMSG_OK(nh, (unsigned) size) && (nh->nlmsg_type != NLMSG_DONE);
+         nh = NLMSG_NEXT(nh, size)) {
 
         if (nh->nlmsg_type == RTM_NEWLINK) {
             int len = nh->nlmsg_len - sizeof(*nh);
@@ -127,10 +330,41 @@ bool NetlinkEvent::parseBinaryNetlinkMessage(char *buffer, int size) {
             mSubsystem = strdup("qlog");
             mAction = NlActionChange;
 
+        } else if (nh->nlmsg_type == RTM_NEWADDR ||
+                   nh->nlmsg_type == RTM_DELADDR) {
+            int len = nh->nlmsg_len - sizeof(*nh);
+            struct ifaddrmsg *ifa;
+
+            if (sizeof(*ifa) > (size_t) len) {
+                SLOGE("Got a short RTM_xxxADDR message\n");
+                continue;
+            }
+
+            ifa = (ifaddrmsg *)NLMSG_DATA(nh);
+            size_t rtasize = IFA_PAYLOAD(nh);
+            if (!parseIfAddrMessage(nh->nlmsg_type, ifa, rtasize)) {
+                continue;
+            }
+
+        } else if (nh->nlmsg_type == RTM_NEWNDUSEROPT) {
+            int len = nh->nlmsg_len - sizeof(*nh);
+            struct nduseroptmsg *ndmsg = (struct nduseroptmsg *) NLMSG_DATA(nh);
+
+            if (sizeof(*ndmsg) > (size_t) len) {
+                SLOGE("Got a short RTM_NEWNDUSEROPT message\n");
+                continue;
+            }
+
+            size_t optsize = NLMSG_PAYLOAD(nh, sizeof(*ndmsg));
+            if (!parseNdUserOptMessage(ndmsg, optsize)) {
+                continue;
+            }
+
+
         } else {
-                SLOGD("Unexpected netlink message. type=0x%x\n", nh->nlmsg_type);
+                SLOGD("Unexpected netlink message. type=0x%x\n",
+                      nh->nlmsg_type);
         }
-        nh = NLMSG_NEXT(nh, size);
     }
 
     return true;
@@ -164,7 +398,6 @@ bool NetlinkEvent::parseAsciiNetlinkMessage(char *buffer, int size) {
     const char *s = buffer;
     const char *end;
     int param_idx = 0;
-    int i;
     int first = 1;
 
     if (size == 0)

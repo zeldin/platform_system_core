@@ -21,9 +21,9 @@ int ioctl_main(int argc, char *argv[])
     int arg_size = 4;
     int direct_arg = 0;
     uint32_t ioctl_nr;
-    void *ioctl_args;
+    void *ioctl_args = NULL;
     uint8_t *ioctl_argp;
-    uint8_t *ioctl_argp_save;
+    uint8_t *ioctl_argp_save = NULL;
     int rem;
 
     do {
@@ -45,7 +45,7 @@ int ioctl_main(int argc, char *argv[])
             break;
         case 'h':
             fprintf(stderr, "%s [-l <length>] [-a <argsize>] [-rdh] <device> <ioctlnr>\n"
-                    "  -l <lenght>   Length of io buffer\n"
+                    "  -l <length>   Length of io buffer\n"
                     "  -a <argsize>  Size of each argument (1-8)\n"
                     "  -r            Open device in read only mode\n"
                     "  -d            Direct argument (no iobuffer)\n"
@@ -112,6 +112,7 @@ int ioctl_main(int argc, char *argv[])
     else
         res = ioctl(fd, ioctl_nr, 0);
     if (res < 0) {
+        free(ioctl_args);
         fprintf(stderr, "ioctl 0x%x failed, %d\n", ioctl_nr, res);
         return 1;
     }
@@ -124,5 +125,6 @@ int ioctl_main(int argc, char *argv[])
         }
         printf("\n");
     }
+    free(ioctl_args);
     return 0;
 }

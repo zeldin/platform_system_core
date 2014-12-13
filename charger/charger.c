@@ -40,12 +40,15 @@
 #include <cutils/list.h>
 #include <cutils/misc.h>
 #include <cutils/uevent.h>
+#include <cutils/properties.h>
 
 #ifdef CHARGER_ENABLE_SUSPEND
 #include <suspend/autosuspend.h>
 #endif
 
 #include "minui/minui.h"
+
+char *locale;
 
 #ifndef max
 #define max(a,b) ((a) > (b) ? (a) : (b))
@@ -89,7 +92,6 @@ struct power_supply {
 };
 
 struct frame {
-    const char *name;
     int disp_time;
     int min_capacity;
     bool level_only;
@@ -140,33 +142,27 @@ struct uevent {
 
 static struct frame batt_anim_frames[] = {
     {
-        .name = "charger/battery_0",
         .disp_time = 750,
         .min_capacity = 0,
     },
     {
-        .name = "charger/battery_1",
         .disp_time = 750,
         .min_capacity = 20,
     },
     {
-        .name = "charger/battery_2",
         .disp_time = 750,
         .min_capacity = 40,
     },
     {
-        .name = "charger/battery_3",
         .disp_time = 750,
         .min_capacity = 60,
     },
     {
-        .name = "charger/battery_4",
         .disp_time = 750,
         .min_capacity = 80,
         .level_only = true,
     },
     {
-        .name = "charger/battery_5",
         .disp_time = 750,
         .min_capacity = BATTERY_FULL_THRESH,
     },
@@ -196,8 +192,8 @@ static int64_t curr_time_ms(void)
 static void clear_screen(void)
 {
     gr_color(0, 0, 0, 255);
-    gr_fill(0, 0, gr_fb_width(), gr_fb_height());
-};
+    gr_clear();
+}
 
 #define MAX_KLOG_WRITE_BUF_SZ 256
 
@@ -657,8 +653,8 @@ static void draw_battery(struct charger *charger)
 
     if (batt_anim->num_frames != 0) {
         draw_surface_centered(charger, frame->surface);
-        LOGV("drawing frame #%d name=%s min_cap=%d time=%d\n",
-             batt_anim->cur_frame, frame->name, frame->min_capacity,
+        LOGV("drawing frame #%d min_cap=%d time=%d\n",
+             batt_anim->cur_frame, frame->min_capacity,
              frame->disp_time);
     }
 }
@@ -755,24 +751,33 @@ static void update_screen_state(struct charger *charger, int64_t now)
     /* schedule next screen transition */
     charger->next_screen_transition = now + disp_time;
 
-    /* advance frame cntr to the next valid frame
+    /* advance frame cntr to the next valid frame only if we are charging
      * if necessary, advance cycle cntr, and reset frame cntr
      */
-    batt_anim->cur_frame++;
-
-    /* if the frame is used for level-only, that is only show it when it's
-     * the current level, skip it during the animation.
-     */
-    while (batt_anim->cur_frame < batt_anim->num_frames &&
-           batt_anim->frames[batt_anim->cur_frame].level_only)
+    if (charger->num_supplies_online != 0) {
         batt_anim->cur_frame++;
-    if (batt_anim->cur_frame >= batt_anim->num_frames) {
-        batt_anim->cur_cycle++;
-        batt_anim->cur_frame = 0;
+
+        /* if the frame is used for level-only, that is only show it when it's
+         * the current level, skip it during the animation.
+         */
+        while (batt_anim->cur_frame < batt_anim->num_frames &&
+               batt_anim->frames[batt_anim->cur_frame].level_only)
+            batt_anim->cur_frame++;
+        if (batt_anim->cur_frame >= batt_anim->num_frames) {
+            batt_anim->cur_cycle++;
+            batt_anim->cur_frame = 0;
 
         /* don't reset the cycle counter, since we use that as a signal
          * in a test above to check if animation is over
          */
+        }
+    } else {
+        /* Stop animating if we're not charging.
+         * If we stop it immediately instead of going through this loop, then
+         * the animation would stop somewhere in the middle.
+         */
+        batt_anim->cur_frame = 0;
+        batt_anim->cur_cycle++;
     }
 }
 
@@ -835,8 +840,16 @@ static void process_key(struct charger *charger, int code, int64_t now)
         if (key->down) {
             int64_t reboot_timeout = key->timestamp + POWER_ON_KEY_TIME;
             if (now >= reboot_timeout) {
-                LOGI("[%lld] rebooting\n", now);
-                android_reboot(ANDROID_RB_RESTART, 0, 0);
+                /* We do not currently support booting from charger mode on
+                   all devices. Check the property and continue booting or reboot
+                   accordingly. */
+                if (property_get_bool("ro.enable_boot_charger_mode", false)) {
+                    LOGI("[%lld] booting from charger mode\n", now);
+                    property_set("sys.boot_from_charger_mode", "1");
+                } else {
+                    LOGI("[%lld] rebooting\n", now);
+                    android_reboot(ANDROID_RB_RESTART, 0, 0);
+                }
             } else {
                 /* if the key is pressed but timeout hasn't expired,
                  * make sure we wake up at the right-ish time to check
@@ -978,22 +991,29 @@ int main(int argc, char **argv)
     charger->uevent_fd = fd;
     coldboot(charger, "/sys/class/power_supply", "add");
 
-    ret = res_create_surface("charger/battery_fail", &charger->surf_unknown);
+    ret = res_create_display_surface("charger/battery_fail", &charger->surf_unknown);
     if (ret < 0) {
-        LOGE("Cannot load image\n");
+        LOGE("Cannot load battery_fail image\n");
         charger->surf_unknown = NULL;
     }
 
-    for (i = 0; i < charger->batt_anim->num_frames; i++) {
-        struct frame *frame = &charger->batt_anim->frames[i];
+    charger->batt_anim = &battery_animation;
 
-        ret = res_create_surface(frame->name, &frame->surface);
-        if (ret < 0) {
-            LOGE("Cannot load image %s\n", frame->name);
-            /* TODO: free the already allocated surfaces... */
-            charger->batt_anim->num_frames = 0;
-            charger->batt_anim->num_cycles = 1;
-            break;
+    gr_surface* scale_frames;
+    int scale_count;
+    ret = res_create_multi_display_surface("charger/battery_scale", &scale_count, &scale_frames);
+    if (ret < 0) {
+        LOGE("Cannot load battery_scale image\n");
+        charger->batt_anim->num_frames = 0;
+        charger->batt_anim->num_cycles = 1;
+    } else if (scale_count != charger->batt_anim->num_frames) {
+        LOGE("battery_scale image has unexpected frame count (%d, expected %d)\n",
+             scale_count, charger->batt_anim->num_frames);
+        charger->batt_anim->num_frames = 0;
+        charger->batt_anim->num_cycles = 1;
+    } else {
+        for (i = 0; i < charger->batt_anim->num_frames; i++) {
+            charger->batt_anim->frames[i].surface = scale_frames[i];
         }
     }
 

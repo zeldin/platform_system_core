@@ -328,7 +328,8 @@ static int try_device(io_service_t device, usb_handle *handle) {
         ERR("GetLocationId");
         goto error;
     }
-    snprintf(handle->info.device_path, sizeof(handle->info.device_path), "usb:%lX", locationId);
+    snprintf(handle->info.device_path, sizeof(handle->info.device_path),
+             "usb:%" PRIu32 "X", (unsigned int)locationId);
 
     kr = (*dev)->USBGetSerialNumberStringIndex(dev, &serialIndex);
 
@@ -464,6 +465,11 @@ usb_handle *usb_open(ifc_match_func callback) {
 
 int usb_close(usb_handle *h) {
     /* TODO: Something better here? */
+    return 0;
+}
+
+int usb_wait_for_disconnect(usb_handle *usb) {
+    /* TODO: Punt for now */
     return 0;
 }
 

@@ -42,10 +42,9 @@
 #include <cutils/android_reboot.h>
 #include <cutils/sockets.h>
 #include <cutils/iosched_policy.h>
+#include <cutils/fs.h>
 #include <private/android_filesystem_config.h>
 #include <termios.h>
-
-#include <sys/system_properties.h>
 
 #include "devices.h"
 #include "init.h"
@@ -66,6 +65,7 @@ static int property_triggers_enabled = 0;
 
 #if BOOTCHART
 static int   bootchart_count;
+static long long bootchart_time = 0;
 #endif
 
 static char console[32];
@@ -97,11 +97,24 @@ static const char *ENV[32];
 /* add_environment - add "key=value" to the current environment */
 int add_environment(const char *key, const char *val)
 {
-    int n;
+    size_t n;
+    size_t key_len = strlen(key);
 
-    for (n = 0; n < 31; n++) {
-        if (!ENV[n]) {
-            size_t len = strlen(key) + strlen(val) + 2;
+    /* The last environment entry is reserved to terminate the list */
+    for (n = 0; n < (ARRAY_SIZE(ENV) - 1); n++) {
+
+        /* Delete any existing entry for this key */
+        if (ENV[n] != NULL) {
+            size_t entry_key_len = strcspn(ENV[n], "=");
+            if ((entry_key_len == key_len) && (strncmp(ENV[n], key, entry_key_len) == 0)) {
+                free((char*)ENV[n]);
+                ENV[n] = NULL;
+            }
+        }
+
+        /* Add entry if a free slot is available */
+        if (ENV[n] == NULL) {
+            size_t len = key_len + strlen(val) + 2;
             char *entry = malloc(len);
             snprintf(entry, len, "%s=%s", key, val);
             ENV[n] = entry;
@@ -109,7 +122,9 @@ int add_environment(const char *key, const char *val)
         }
     }
 
-    return 1;
+    ERROR("No env. room to store: '%s':'%s'\n", key, val);
+
+    return -1;
 }
 
 static void zap_stdio(void)
@@ -163,7 +178,7 @@ void service_start(struct service *svc, const char *dynamic_args)
          * state and immediately takes it out of the restarting
          * state if it was in there
          */
-    svc->flags &= (~(SVC_DISABLED|SVC_RESTARTING|SVC_RESET|SVC_RESTART));
+    svc->flags &= (~(SVC_DISABLED|SVC_RESTARTING|SVC_RESET|SVC_RESTART|SVC_DISABLED_START));
     svc->time_started = 0;
 
         /* running processes require no additional work -- if
@@ -220,6 +235,9 @@ void service_start(struct service *svc, const char *dynamic_args)
             }
 
             rc = security_compute_create(mycon, fcon, string_to_security_class("process"), &scon);
+            if (rc == 0 && !strcmp(scon, mycon)) {
+                ERROR("Warning!  Service %s needs a SELinux domain defined; please fix!\n", svc->name);
+            }
             freecon(mycon);
             freecon(fcon);
             if (rc < 0) {
@@ -360,7 +378,7 @@ static void service_stop_or_reset(struct service *svc, int how)
 {
     /* The service is still SVC_RUNNING until its process exits, but if it has
      * already exited it shoudn't attempt a restart yet. */
-    svc->flags &= (~SVC_RESTARTING);
+    svc->flags &= ~(SVC_RESTARTING | SVC_DISABLED_START);
 
     if ((how != SVC_DISABLED) && (how != SVC_RESET) && (how != SVC_RESTART)) {
         /* Hrm, an illegal flag.  Default to SVC_DISABLED */
@@ -526,7 +544,8 @@ static int is_last_command(struct action *act, struct command *cmd)
 
 void execute_one_command(void)
 {
-    int ret;
+    int ret, i;
+    char cmd_str[256] = "";
 
     if (!cur_action || !cur_command || is_last_command(cur_action, cur_command)) {
         cur_action = action_remove_queue_head();
@@ -543,7 +562,17 @@ void execute_one_command(void)
         return;
 
     ret = cur_command->func(cur_command->nargs, cur_command->args);
-    INFO("command '%s' r=%d\n", cur_command->args[0], ret);
+    if (klog_get_level() >= KLOG_INFO_LEVEL) {
+        for (i = 0; i < cur_command->nargs; i++) {
+            strlcat(cmd_str, cur_command->args[i], sizeof(cmd_str));
+            if (i < cur_command->nargs - 1) {
+                strlcat(cmd_str, " ", sizeof(cmd_str));
+            }
+        }
+        INFO("command '%s' action=%s status=%d (%s:%d)\n",
+             cmd_str, cur_action ? cur_action->name : "", ret, cur_command->filename,
+             cur_command->line);
+    }
 }
 
 static int wait_for_coldboot_done_action(int nargs, char **args)
@@ -554,6 +583,84 @@ static int wait_for_coldboot_done_action(int nargs, char **args)
     if (ret)
         ERROR("Timed out waiting for %s\n", coldboot_done);
     return ret;
+}
+
+/*
+ * Writes 512 bytes of output from Hardware RNG (/dev/hw_random, backed
+ * by Linux kernel's hw_random framework) into Linux RNG's via /dev/urandom.
+ * Does nothing if Hardware RNG is not present.
+ *
+ * Since we don't yet trust the quality of Hardware RNG, these bytes are not
+ * mixed into the primary pool of Linux RNG and the entropy estimate is left
+ * unmodified.
+ *
+ * If the HW RNG device /dev/hw_random is present, we require that at least
+ * 512 bytes read from it are written into Linux RNG. QA is expected to catch
+ * devices/configurations where these I/O operations are blocking for a long
+ * time. We do not reboot or halt on failures, as this is a best-effort
+ * attempt.
+ */
+static int mix_hwrng_into_linux_rng_action(int nargs, char **args)
+{
+    int result = -1;
+    int hwrandom_fd = -1;
+    int urandom_fd = -1;
+    char buf[512];
+    ssize_t chunk_size;
+    size_t total_bytes_written = 0;
+
+    hwrandom_fd = TEMP_FAILURE_RETRY(
+            open("/dev/hw_random", O_RDONLY | O_NOFOLLOW));
+    if (hwrandom_fd == -1) {
+        if (errno == ENOENT) {
+          ERROR("/dev/hw_random not found\n");
+          /* It's not an error to not have a Hardware RNG. */
+          result = 0;
+        } else {
+          ERROR("Failed to open /dev/hw_random: %s\n", strerror(errno));
+        }
+        goto ret;
+    }
+
+    urandom_fd = TEMP_FAILURE_RETRY(
+            open("/dev/urandom", O_WRONLY | O_NOFOLLOW));
+    if (urandom_fd == -1) {
+        ERROR("Failed to open /dev/urandom: %s\n", strerror(errno));
+        goto ret;
+    }
+
+    while (total_bytes_written < sizeof(buf)) {
+        chunk_size = TEMP_FAILURE_RETRY(
+                read(hwrandom_fd, buf, sizeof(buf) - total_bytes_written));
+        if (chunk_size == -1) {
+            ERROR("Failed to read from /dev/hw_random: %s\n", strerror(errno));
+            goto ret;
+        } else if (chunk_size == 0) {
+            ERROR("Failed to read from /dev/hw_random: EOF\n");
+            goto ret;
+        }
+
+        chunk_size = TEMP_FAILURE_RETRY(write(urandom_fd, buf, chunk_size));
+        if (chunk_size == -1) {
+            ERROR("Failed to write to /dev/urandom: %s\n", strerror(errno));
+            goto ret;
+        }
+        total_bytes_written += chunk_size;
+    }
+
+    INFO("Mixed %zu bytes from /dev/hw_random into /dev/urandom",
+                total_bytes_written);
+    result = 0;
+
+ret:
+    if (hwrandom_fd != -1) {
+        close(hwrandom_fd);
+    }
+    if (urandom_fd != -1) {
+        close(urandom_fd);
+    }
+    memset(buf, 0, sizeof(buf));
+    return result;
 }
 
 static int keychord_init_action(int nargs, char **args)
@@ -575,29 +682,28 @@ static int console_init_action(int nargs, char **args)
         have_console = 1;
     close(fd);
 
-    if( load_565rle_image(INIT_IMAGE_FILE) ) {
-        fd = open("/dev/tty0", O_WRONLY);
-        if (fd >= 0) {
-            const char *msg;
-                msg = "\n"
-            "\n"
-            "\n"
-            "\n"
-            "\n"
-            "\n"
-            "\n"  // console is 40 cols x 30 lines
-            "\n"
-            "\n"
-            "\n"
-            "\n"
-            "\n"
-            "\n"
-            "\n"
-            "             A N D R O I D ";
-            write(fd, msg, strlen(msg));
-            close(fd);
-        }
+    fd = open("/dev/tty0", O_WRONLY);
+    if (fd >= 0) {
+        const char *msg;
+            msg = "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"  // console is 40 cols x 30 lines
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "\n"
+        "             A N D R O I D ";
+        write(fd, msg, strlen(msg));
+        close(fd);
     }
+
     return 0;
 }
 
@@ -712,27 +818,21 @@ static int property_service_init_action(int nargs, char **args)
      * that /data/local.prop cannot interfere with them.
      */
     start_property_service();
+    if (get_property_set_fd() < 0) {
+        ERROR("start_property_service() failed\n");
+        exit(1);
+    }
+
     return 0;
 }
 
 static int signal_init_action(int nargs, char **args)
 {
     signal_init();
-    return 0;
-}
-
-static int check_startup_action(int nargs, char **args)
-{
-    /* make sure we actually have all the pieces we need */
-    if ((get_property_set_fd() < 0) ||
-        (get_signal_fd() < 0)) {
-        ERROR("init startup failure\n");
+    if (get_signal_fd() < 0) {
+        ERROR("signal_init() failed\n");
         exit(1);
     }
-
-        /* signal that we hit this point */
-    unlink("/dev/.booting");
-
     return 0;
 }
 
@@ -761,37 +861,35 @@ static int bootchart_init_action(int nargs, char **args)
 #endif
 
 static const struct selinux_opt seopts_prop[] = {
-        { SELABEL_OPT_PATH, "/data/security/property_contexts" },
         { SELABEL_OPT_PATH, "/property_contexts" },
+        { SELABEL_OPT_PATH, "/data/security/current/property_contexts" },
         { 0, NULL }
 };
 
 struct selabel_handle* selinux_android_prop_context_handle(void)
 {
-    int i = 0;
-    struct selabel_handle* sehandle = NULL;
-    while ((sehandle == NULL) && seopts_prop[i].value) {
-        sehandle = selabel_open(SELABEL_CTX_ANDROID_PROP, &seopts_prop[i], 1);
-        i++;
-    }
-
+    int policy_index = selinux_android_use_data_policy() ? 1 : 0;
+    struct selabel_handle* sehandle = selabel_open(SELABEL_CTX_ANDROID_PROP,
+                                                   &seopts_prop[policy_index], 1);
     if (!sehandle) {
         ERROR("SELinux:  Could not load property_contexts:  %s\n",
               strerror(errno));
         return NULL;
     }
-    INFO("SELinux: Loaded property contexts from %s\n", seopts_prop[i - 1].value);
+    INFO("SELinux: Loaded property contexts from %s\n", seopts_prop[policy_index].value);
     return sehandle;
 }
 
 void selinux_init_all_handles(void)
 {
     sehandle = selinux_android_file_context_handle();
+    selinux_android_set_sehandle(sehandle);
     sehandle_prop = selinux_android_prop_context_handle();
 }
 
 static bool selinux_is_disabled(void)
 {
+#ifdef ALLOW_DISABLE_SELINUX
     char tmp[PROP_VALUE_MAX];
 
     if (access("/sys/fs/selinux", F_OK) != 0) {
@@ -805,12 +903,14 @@ static bool selinux_is_disabled(void)
         /* SELinux is compiled into the kernel, but we've been told to disable it. */
         return true;
     }
+#endif
 
     return false;
 }
 
 static bool selinux_is_enforcing(void)
 {
+#ifdef ALLOW_DISABLE_SELINUX
     char tmp[PROP_VALUE_MAX];
 
     if (property_get("ro.boot.selinux", tmp) == 0) {
@@ -827,6 +927,7 @@ static bool selinux_is_enforcing(void)
         ERROR("SELinux: Unknown value of ro.boot.selinux. Got: \"%s\". Assuming enforcing.\n", tmp);
     }
 
+#endif
     return true;
 }
 
@@ -852,9 +953,30 @@ int selinux_reload_policy(void)
     return 0;
 }
 
-int audit_callback(void *data, security_class_t cls, char *buf, size_t len)
+static int audit_callback(void *data, security_class_t cls __attribute__((unused)), char *buf, size_t len)
 {
     snprintf(buf, len, "property=%s", !data ? "NULL" : (char *)data);
+    return 0;
+}
+
+int log_callback(int type, const char *fmt, ...)
+{
+    int level;
+    va_list ap;
+    switch (type) {
+    case SELINUX_WARNING:
+        level = KLOG_WARNING_LEVEL;
+        break;
+    case SELINUX_INFO:
+        level = KLOG_INFO_LEVEL;
+        break;
+    default:
+        level = KLOG_ERROR_LEVEL;
+        break;
+    }
+    va_start(ap, fmt);
+    klog_vwrite(level, fmt, ap);
+    va_end(ap);
     return 0;
 }
 
@@ -931,7 +1053,7 @@ int main(int argc, char **argv)
     process_kernel_cmdline();
 
     union selinux_callback cb;
-    cb.func_log = klog_write;
+    cb.func_log = log_callback;
     selinux_set_callback(SELINUX_CB_LOG, cb);
 
     cb.func_audit = audit_callback;
@@ -950,8 +1072,7 @@ int main(int argc, char **argv)
     is_charger = !strcmp(bootmode, "charger");
 
     INFO("property init\n");
-    if (!is_charger)
-        property_load_boot_defaults();
+    property_load_boot_defaults();
 
     INFO("reading config file\n");
     init_parse_config_file("/init.rc");
@@ -959,32 +1080,28 @@ int main(int argc, char **argv)
     action_for_each_trigger("early-init", action_add_queue_tail);
 
     queue_builtin_action(wait_for_coldboot_done_action, "wait_for_coldboot_done");
+    queue_builtin_action(mix_hwrng_into_linux_rng_action, "mix_hwrng_into_linux_rng");
     queue_builtin_action(keychord_init_action, "keychord_init");
     queue_builtin_action(console_init_action, "console_init");
 
     /* execute all the boot actions to get us started */
     action_for_each_trigger("init", action_add_queue_tail);
 
-    /* skip mounting filesystems in charger mode */
-    if (!is_charger) {
-        action_for_each_trigger("early-fs", action_add_queue_tail);
-        action_for_each_trigger("fs", action_add_queue_tail);
-        action_for_each_trigger("post-fs", action_add_queue_tail);
-        action_for_each_trigger("post-fs-data", action_add_queue_tail);
-    }
-
+    /* Repeat mix_hwrng_into_linux_rng in case /dev/hw_random or /dev/random
+     * wasn't ready immediately after wait_for_coldboot_done
+     */
+    queue_builtin_action(mix_hwrng_into_linux_rng_action, "mix_hwrng_into_linux_rng");
     queue_builtin_action(property_service_init_action, "property_service_init");
     queue_builtin_action(signal_init_action, "signal_init");
-    queue_builtin_action(check_startup_action, "check_startup");
 
+    /* Don't mount filesystems or start core system services if in charger mode. */
     if (is_charger) {
         action_for_each_trigger("charger", action_add_queue_tail);
     } else {
-        action_for_each_trigger("early-boot", action_add_queue_tail);
-        action_for_each_trigger("boot", action_add_queue_tail);
+        action_for_each_trigger("late-init", action_add_queue_tail);
     }
 
-        /* run all property triggers based on current state of the properties */
+    /* run all property triggers based on current state of the properties */
     queue_builtin_action(queue_property_triggers_action, "queue_property_triggers");
 
 
@@ -1031,11 +1148,29 @@ int main(int argc, char **argv)
 
 #if BOOTCHART
         if (bootchart_count > 0) {
-            if (timeout < 0 || timeout > BOOTCHART_POLLING_MS)
-                timeout = BOOTCHART_POLLING_MS;
-            if (bootchart_step() < 0 || --bootchart_count == 0) {
-                bootchart_finish();
-                bootchart_count = 0;
+            long long current_time;
+            int elapsed_time, remaining_time;
+
+            current_time = bootchart_gettime();
+            elapsed_time = current_time - bootchart_time;
+
+            if (elapsed_time >= BOOTCHART_POLLING_MS) {
+                /* count missed samples */
+                while (elapsed_time >= BOOTCHART_POLLING_MS) {
+                    elapsed_time -= BOOTCHART_POLLING_MS;
+                    bootchart_count--;
+                }
+                /* count may be negative, take a sample anyway */
+                bootchart_time = current_time;
+                if (bootchart_step() < 0 || bootchart_count <= 0) {
+                    bootchart_finish();
+                    bootchart_count = 0;
+                }
+            }
+            if (bootchart_count > 0) {
+                remaining_time = BOOTCHART_POLLING_MS - elapsed_time;
+                if (timeout < 0 || timeout > remaining_time)
+                    timeout = remaining_time;
             }
         }
 #endif
@@ -1045,7 +1180,7 @@ int main(int argc, char **argv)
             continue;
 
         for (i = 0; i < fd_count; i++) {
-            if (ufds[i].revents == POLLIN) {
+            if (ufds[i].revents & POLLIN) {
                 if (ufds[i].fd == get_property_set_fd())
                     handle_property_set_fd();
                 else if (ufds[i].fd == get_keychord_fd())

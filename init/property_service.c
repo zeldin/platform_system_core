@@ -38,7 +38,6 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <sys/mman.h>
-#include <sys/atomics.h>
 #include <private/android_filesystem_config.h>
 
 #include <selinux/selinux.h>
@@ -55,62 +54,6 @@ static int persistent_properties_loaded = 0;
 static int property_area_inited = 0;
 
 static int property_set_fd = -1;
-
-/* White list of permissions for setting property services. */
-struct {
-    const char *prefix;
-    unsigned int uid;
-    unsigned int gid;
-} property_perms[] = {
-    { "net.rmnet0.",      AID_RADIO,    0 },
-    { "net.gprs.",        AID_RADIO,    0 },
-    { "net.ppp",          AID_RADIO,    0 },
-    { "net.qmi",          AID_RADIO,    0 },
-    { "net.lte",          AID_RADIO,    0 },
-    { "net.cdma",         AID_RADIO,    0 },
-    { "ril.",             AID_RADIO,    0 },
-    { "gsm.",             AID_RADIO,    0 },
-    { "persist.radio",    AID_RADIO,    0 },
-    { "net.dns",          AID_RADIO,    0 },
-    { "sys.usb.config",   AID_RADIO,    0 },
-    { "net.",             AID_SYSTEM,   0 },
-    { "dev.",             AID_SYSTEM,   0 },
-    { "runtime.",         AID_SYSTEM,   0 },
-    { "hw.",              AID_SYSTEM,   0 },
-    { "sys.",             AID_SYSTEM,   0 },
-    { "service.",         AID_SYSTEM,   0 },
-    { "wlan.",            AID_SYSTEM,   0 },
-    { "gps.",             AID_GPS,      0 },
-    { "bluetooth.",       AID_BLUETOOTH,   0 },
-    { "dhcp.",            AID_SYSTEM,   0 },
-    { "dhcp.",            AID_DHCP,     0 },
-    { "debug.",           AID_SYSTEM,   0 },
-    { "debug.",           AID_SHELL,    0 },
-    { "log.",             AID_SHELL,    0 },
-    { "service.adb.root", AID_SHELL,    0 },
-    { "service.adb.tcp.port", AID_SHELL,    0 },
-    { "persist.sys.",     AID_SYSTEM,   0 },
-    { "persist.service.", AID_SYSTEM,   0 },
-    { "persist.security.", AID_SYSTEM,   0 },
-    { "persist.gps.",      AID_GPS,      0 },
-    { "persist.service.bdroid.", AID_BLUETOOTH,   0 },
-    { "selinux."         , AID_SYSTEM,   0 },
-    { NULL, 0, 0 }
-};
-
-/*
- * White list of UID that are allowed to start/stop services.
- * Currently there are no user apps that require.
- */
-struct {
-    const char *service;
-    unsigned int uid;
-    unsigned int gid;
-} control_perms[] = {
-    { "dumpstate",AID_SHELL, AID_LOG },
-    { "ril-daemon",AID_RADIO, AID_RADIO },
-     {NULL, 0, 0 }
-};
 
 typedef struct {
     size_t size;
@@ -167,7 +110,7 @@ static int check_mac_perms(const char *name, char *sctx)
     if (selabel_lookup(sehandle_prop, &tctx, name, 1) != 0)
         goto err;
 
-    if (selinux_check_access(sctx, tctx, class, perm, name) == 0)
+    if (selinux_check_access(sctx, tctx, class, perm, (void*) name) == 0)
         result = 1;
 
     freecon(tctx);
@@ -193,34 +136,10 @@ static int check_control_mac_perms(const char *name, char *sctx)
 }
 
 /*
- * Checks permissions for starting/stoping system services.
- * AID_SYSTEM and AID_ROOT are always allowed.
- *
- * Returns 1 if uid allowed, 0 otherwise.
- */
-static int check_control_perms(const char *name, unsigned int uid, unsigned int gid, char *sctx) {
-
-    int i;
-    if (uid == AID_SYSTEM || uid == AID_ROOT)
-      return check_control_mac_perms(name, sctx);
-
-    /* Search the ACL */
-    for (i = 0; control_perms[i].service; i++) {
-        if (strcmp(control_perms[i].service, name) == 0) {
-            if ((uid && control_perms[i].uid == uid) ||
-                (gid && control_perms[i].gid == gid)) {
-                return check_control_mac_perms(name, sctx);
-            }
-        }
-    }
-    return 0;
-}
-
-/*
  * Checks permissions for setting system properties.
  * Returns 1 if uid allowed, 0 otherwise.
  */
-static int check_perms(const char *name, unsigned int uid, unsigned int gid, char *sctx)
+static int check_perms(const char *name, char *sctx)
 {
     int i;
     unsigned int app_id;
@@ -228,26 +147,7 @@ static int check_perms(const char *name, unsigned int uid, unsigned int gid, cha
     if(!strncmp(name, "ro.", 3))
         name +=3;
 
-    if (uid == 0)
-        return check_mac_perms(name, sctx);
-
-    app_id = multiuser_get_app_id(uid);
-    if (app_id == AID_BLUETOOTH) {
-        uid = app_id;
-    }
-
-    for (i = 0; property_perms[i].prefix; i++) {
-        if (strncmp(property_perms[i].prefix, name,
-                    strlen(property_perms[i].prefix)) == 0) {
-            if ((uid && property_perms[i].uid == uid) ||
-                (gid && property_perms[i].gid == gid)) {
-
-                return check_mac_perms(name, sctx);
-            }
-        }
-    }
-
-    return 0;
+    return check_mac_perms(name, sctx);
 }
 
 int __property_get(const char *name, char *value)
@@ -268,6 +168,7 @@ static void write_persistent_property(const char *name, const char *value)
         return;
     }
     write(fd, value, strlen(value));
+    fsync(fd);
     close(fd);
 
     snprintf(path, sizeof(path), "%s/%s", PERSISTENT_PROPERTY_DIR, name);
@@ -275,6 +176,34 @@ static void write_persistent_property(const char *name, const char *value)
         unlink(tempPath);
         ERROR("Unable to rename persistent property file %s to %s\n", tempPath, path);
     }
+}
+
+static bool is_legal_property_name(const char* name, size_t namelen)
+{
+    size_t i;
+    bool previous_was_dot = false;
+    if (namelen >= PROP_NAME_MAX) return false;
+    if (namelen < 1) return false;
+    if (name[0] == '.') return false;
+    if (name[namelen - 1] == '.') return false;
+
+    /* Only allow alphanumeric, plus '.', '-', or '_' */
+    /* Don't allow ".." to appear in a property name */
+    for (i = 0; i < namelen; i++) {
+        if (name[i] == '.') {
+            if (previous_was_dot == true) return false;
+            previous_was_dot = true;
+            continue;
+        }
+        previous_was_dot = false;
+        if (name[i] == '_' || name[i] == '-') continue;
+        if (name[i] >= 'a' && name[i] <= 'z') continue;
+        if (name[i] >= 'A' && name[i] <= 'Z') continue;
+        if (name[i] >= '0' && name[i] <= '9') continue;
+        return false;
+    }
+
+    return true;
 }
 
 int property_set(const char *name, const char *value)
@@ -285,9 +214,8 @@ int property_set(const char *name, const char *value)
     size_t namelen = strlen(name);
     size_t valuelen = strlen(value);
 
-    if(namelen >= PROP_NAME_MAX) return -1;
-    if(valuelen >= PROP_VALUE_MAX) return -1;
-    if(namelen < 1) return -1;
+    if (!is_legal_property_name(name, namelen)) return -1;
+    if (valuelen >= PROP_VALUE_MAX) return -1;
 
     pi = (prop_info*) __system_property_find(name);
 
@@ -299,7 +227,7 @@ int property_set(const char *name, const char *value)
     } else {
         ret = __system_property_add(name, namelen, value, valuelen);
         if (ret < 0) {
-            ERROR("Failed to set '%s'='%s'", name, value);
+            ERROR("Failed to set '%s'='%s'\n", name, value);
             return ret;
         }
     }
@@ -354,7 +282,7 @@ void handle_property_set_fd()
 
     r = TEMP_FAILURE_RETRY(recv(s, &msg, sizeof(msg), 0));
     if(r != sizeof(prop_msg)) {
-        ERROR("sys_prop: mis-match msg size received: %d expected: %d errno: %d\n",
+        ERROR("sys_prop: mis-match msg size received: %d expected: %zu errno: %d\n",
               r, sizeof(prop_msg), errno);
         close(s);
         return;
@@ -365,20 +293,26 @@ void handle_property_set_fd()
         msg.name[PROP_NAME_MAX-1] = 0;
         msg.value[PROP_VALUE_MAX-1] = 0;
 
+        if (!is_legal_property_name(msg.name, strlen(msg.name))) {
+            ERROR("sys_prop: illegal property name. Got: \"%s\"\n", msg.name);
+            close(s);
+            return;
+        }
+
         getpeercon(s, &source_ctx);
 
         if(memcmp(msg.name,"ctl.",4) == 0) {
             // Keep the old close-socket-early behavior when handling
             // ctl.* properties.
             close(s);
-            if (check_control_perms(msg.value, cr.uid, cr.gid, source_ctx)) {
+            if (check_control_mac_perms(msg.value, source_ctx)) {
                 handle_control_message((char*) msg.name + 4, (char*) msg.value);
             } else {
                 ERROR("sys_prop: Unable to %s service ctl [%s] uid:%d gid:%d pid:%d\n",
                         msg.name + 4, msg.value, cr.uid, cr.gid, cr.pid);
             }
         } else {
-            if (check_perms(msg.name, cr.uid, cr.gid, source_ctx)) {
+            if (check_perms(msg.name, source_ctx)) {
                 property_set((char*) msg.name, (char*) msg.value);
             } else {
                 ERROR("sys_prop: permission denied uid:%d  name:%s\n",
@@ -405,40 +339,73 @@ void get_property_workspace(int *fd, int *sz)
     *sz = pa_workspace.size;
 }
 
-static void load_properties(char *data, char *prefix)
-{
-    char *key, *value, *eol, *sol, *tmp;
-    size_t plen;
+static void load_properties_from_file(const char *, const char *);
 
-    if (prefix)
-        plen = strlen(prefix);
+/*
+ * Filter is used to decide which properties to load: NULL loads all keys,
+ * "ro.foo.*" is a prefix match, and "ro.foo.bar" is an exact match.
+ */
+static void load_properties(char *data, const char *filter)
+{
+    char *key, *value, *eol, *sol, *tmp, *fn;
+    size_t flen = 0;
+
+    if (filter) {
+        flen = strlen(filter);
+    }
+
     sol = data;
-    while((eol = strchr(sol, '\n'))) {
+    while ((eol = strchr(sol, '\n'))) {
         key = sol;
         *eol++ = 0;
         sol = eol;
 
-        value = strchr(key, '=');
-        if(value == 0) continue;
-        *value++ = 0;
+        while (isspace(*key)) key++;
+        if (*key == '#') continue;
 
-        while(isspace(*key)) key++;
-        if(*key == '#') continue;
-        tmp = value - 2;
-        while((tmp > key) && isspace(*tmp)) *tmp-- = 0;
-
-        if (prefix && strncmp(key, prefix, plen))
-            continue;
-
-        while(isspace(*value)) value++;
         tmp = eol - 2;
-        while((tmp > value) && isspace(*tmp)) *tmp-- = 0;
+        while ((tmp > key) && isspace(*tmp)) *tmp-- = 0;
 
-        property_set(key, value);
+        if (!strncmp(key, "import ", 7) && flen == 0) {
+            fn = key + 7;
+            while (isspace(*fn)) fn++;
+
+            key = strchr(fn, ' ');
+            if (key) {
+                *key++ = 0;
+                while (isspace(*key)) key++;
+            }
+
+            load_properties_from_file(fn, key);
+
+        } else {
+            value = strchr(key, '=');
+            if (!value) continue;
+            *value++ = 0;
+
+            tmp = value - 2;
+            while ((tmp > key) && isspace(*tmp)) *tmp-- = 0;
+
+            while (isspace(*value)) value++;
+
+            if (flen > 0) {
+                if (filter[flen - 1] == '*') {
+                    if (strncmp(key, filter, flen - 1)) continue;
+                } else {
+                    if (strcmp(key, filter)) continue;
+                }
+            }
+
+            property_set(key, value);
+        }
     }
 }
 
-static void load_properties_from_file(const char *fn, char *prefix)
+/*
+ * Filter is used to decide which properties to load: NULL loads all keys,
+ * "ro.foo.*" is a prefix match, and "ro.foo.bar" is an exact match.
+ */
+static void load_properties_from_file(const char *fn, const char *filter)
 {
     char *data;
     unsigned sz;
@@ -446,7 +413,7 @@ static void load_properties_from_file(const char *fn, char *prefix)
     data = read_file(fn, &sz);
 
     if(data != 0) {
-        load_properties(data, prefix);
+        load_properties(data, filter);
         free(data);
     }
 }
@@ -488,8 +455,9 @@ static void load_persistent_properties()
                     || (sb.st_uid != 0)
                     || (sb.st_gid != 0)
                     || (sb.st_nlink != 1)) {
-                ERROR("skipping insecure property file %s (uid=%lu gid=%lu nlink=%d mode=%o)\n",
-                      entry->d_name, sb.st_uid, sb.st_gid, sb.st_nlink, sb.st_mode);
+                ERROR("skipping insecure property file %s (uid=%u gid=%u nlink=%d mode=%o)\n",
+                      entry->d_name, (unsigned int)sb.st_uid, (unsigned int)sb.st_gid,
+                      sb.st_nlink, sb.st_mode);
                 close(fd);
                 continue;
             }
@@ -552,16 +520,21 @@ void load_persist_props(void)
     load_persistent_properties();
 }
 
+void load_all_props(void)
+{
+    load_properties_from_file(PROP_PATH_SYSTEM_BUILD, NULL);
+    load_properties_from_file(PROP_PATH_SYSTEM_DEFAULT, NULL);
+    load_properties_from_file(PROP_PATH_FACTORY, "ro.*");
+
+    load_override_properties();
+
+    /* Read persistent properties after all default values have been loaded. */
+    load_persistent_properties();
+}
+
 void start_property_service(void)
 {
     int fd;
-
-    load_properties_from_file(PROP_PATH_SYSTEM_BUILD, NULL);
-    load_properties_from_file(PROP_PATH_SYSTEM_DEFAULT, NULL);
-    load_properties_from_file(PROP_PATH_FACTORY, "ro.");
-    load_override_properties();
-    /* Read persistent properties after all default values have been loaded. */
-    load_persistent_properties();
 
     fd = create_socket(PROP_SERVICE_NAME, SOCK_STREAM, 0666, 0, 0, NULL);
     if(fd < 0) return;

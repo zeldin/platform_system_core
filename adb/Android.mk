@@ -24,6 +24,7 @@ ifeq ($(HOST_OS),darwin)
   USB_SRCS := usb_osx.c
   EXTRA_SRCS := get_my_path_darwin.c
   LOCAL_LDLIBS += -lpthread -framework CoreFoundation -framework IOKit -framework Carbon
+  LOCAL_CFLAGS += -Wno-sizeof-pointer-memaccess -Wno-unused-parameter
 endif
 
 ifeq ($(HOST_OS),freebsd)
@@ -34,7 +35,7 @@ endif
 
 ifeq ($(HOST_OS),windows)
   USB_SRCS := usb_windows.c
-  EXTRA_SRCS := get_my_path_windows.c ../libcutils/list.c
+  EXTRA_SRCS := get_my_path_windows.c
   EXTRA_STATIC_LIBS := AdbWinApi
   ifneq ($(strip $(USE_CYGWIN)),)
     # Pure cygwin case
@@ -64,7 +65,6 @@ LOCAL_SRC_FILES := \
 	file_sync_client.c \
 	$(EXTRA_SRCS) \
 	$(USB_SRCS) \
-	utils.c \
 	usb_vendors.c
 
 LOCAL_C_INCLUDES += external/openssl/include
@@ -75,7 +75,7 @@ else
   LOCAL_SRC_FILES += fdevent.c
 endif
 
-LOCAL_CFLAGS += -O2 -g -DADB_HOST=1  -Wall -Wno-unused-parameter
+LOCAL_CFLAGS += -O2 -g -DADB_HOST=1 -Wall -Wno-unused-parameter -Werror
 LOCAL_CFLAGS += -D_XOPEN_SOURCE -D_GNU_SOURCE
 LOCAL_MODULE := adb
 LOCAL_MODULE_TAGS := debug
@@ -85,6 +85,7 @@ ifeq ($(USE_SYSDEPS_WIN32),)
 	LOCAL_STATIC_LIBRARIES += libcutils
 endif
 
+LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk
 include $(BUILD_HOST_EXECUTABLE)
 
 $(call dist-for-goals,dist_files sdk,$(LOCAL_BUILT_MODULE))
@@ -103,7 +104,6 @@ include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES := \
 	adb.c \
-	backup_service.c \
 	fdevent.c \
 	transport.c \
 	transport_local.c \
@@ -115,12 +115,15 @@ LOCAL_SRC_FILES := \
 	jdwp_service.c \
 	framebuffer_service.c \
 	remount_service.c \
-	usb_linux_client.c \
-	log_service.c \
-	utils.c
+	usb_linux_client.c
 
-LOCAL_CFLAGS := -O2 -g -DADB_HOST=0 -Wall -Wno-unused-parameter
-LOCAL_CFLAGS += -D_XOPEN_SOURCE -D_GNU_SOURCE
+LOCAL_CFLAGS := \
+	-O2 \
+	-g \
+	-DADB_HOST=0 \
+	-D_XOPEN_SOURCE \
+	-D_GNU_SOURCE \
+	-Wall -Wno-unused-parameter -Werror -Wno-deprecated-declarations \
 
 ifneq (,$(filter userdebug eng,$(TARGET_BUILD_VARIANT)))
 LOCAL_CFLAGS += -DALLOW_ADBD_ROOT=1
@@ -132,7 +135,8 @@ LOCAL_FORCE_STATIC_EXECUTABLE := true
 LOCAL_MODULE_PATH := $(TARGET_ROOT_OUT_SBIN)
 LOCAL_UNSTRIPPED_PATH := $(TARGET_ROOT_OUT_SBIN_UNSTRIPPED)
 
-LOCAL_STATIC_LIBRARIES := libcutils libc libmincrypt
+LOCAL_STATIC_LIBRARIES := liblog libcutils libc libmincrypt libselinux
+LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk
 include $(BUILD_EXECUTABLE)
 
 
@@ -140,8 +144,6 @@ include $(BUILD_EXECUTABLE)
 # =========================================================
 ifneq ($(SDK_ONLY),true)
 include $(CLEAR_VARS)
-
-LOCAL_LDLIBS := -lrt -ldl -lpthread
 
 LOCAL_SRC_FILES := \
 	adb.c \
@@ -157,7 +159,6 @@ LOCAL_SRC_FILES := \
 	file_sync_client.c \
 	get_my_path_linux.c \
 	usb_linux.c \
-	utils.c \
 	usb_vendors.c \
 	fdevent.c
 
@@ -166,8 +167,7 @@ LOCAL_CFLAGS := \
 	-g \
 	-DADB_HOST=1 \
 	-DADB_HOST_ON_TARGET=1 \
-	-Wall \
-	-Wno-unused-parameter \
+	-Wall -Wno-unused-parameter -Werror \
 	-D_XOPEN_SOURCE \
 	-D_GNU_SOURCE
 
@@ -179,5 +179,6 @@ LOCAL_STATIC_LIBRARIES := libzipfile libunz libcutils
 
 LOCAL_SHARED_LIBRARIES := libcrypto
 
+LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk
 include $(BUILD_EXECUTABLE)
 endif
