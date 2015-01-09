@@ -35,6 +35,57 @@
 
 #include "ziparchive/zip_archive.h"
 
+#if BYTE_ORDER == LITTLE_ENDIAN
+
+typedef uint16_t uilsb16_t;
+typedef uint32_t uilsb32_t;
+
+#else /* BYTE_ORDER != LITTLE_ENDIAN */
+
+#if __cplusplus >= 201103L
+#include <type_traits>
+#endif
+
+template<class T> class uilsb {
+
+#if __cplusplus >= 201103L
+  static_assert(std::is_integral<T>::value, "Only integer types supported.");
+  static_assert(!std::is_signed<T>::value,  "Only unsigned types supported.");
+#endif
+
+private:
+  static const int nBytes = sizeof(T)*CHAR_BIT/8;
+  uint8_t data[nBytes];
+
+  T getValue() const {
+    T v = 0;
+    int i;
+    for (i=0; i<nBytes; i++)
+      v |= data[i]<<(i*8);
+    return v;
+  }
+
+  void setValue(const T v) {
+    int i;
+    for (i=0; i<nBytes; i++)
+      data[i] = v>>(i*8);
+  }
+
+public:
+  operator T () const {
+    return getValue();
+  }
+  const T operator=(const T v) {
+    setValue(v);
+    return v;
+  }
+};
+
+typedef uilsb<uint16_t> uilsb16_t;
+typedef uilsb<uint32_t> uilsb32_t;
+
+#endif /* BYTE_ORDER */
+
 // This is for windows. If we don't open a file in binary mode, weird
 // things will happen.
 #ifndef O_BINARY
@@ -56,32 +107,32 @@ struct EocdRecord {
 
   // End of central directory signature, should always be
   // |kSignature|.
-  uint32_t eocd_signature;
+  uilsb32_t eocd_signature;
   // The number of the current "disk", i.e, the "disk" that this
   // central directory is on.
   //
   // This implementation assumes that each archive spans a single
   // disk only. i.e, that disk_num == 1.
-  uint16_t disk_num;
+  uilsb16_t disk_num;
   // The disk where the central directory starts.
   //
   // This implementation assumes that each archive spans a single
   // disk only. i.e, that cd_start_disk == 1.
-  uint16_t cd_start_disk;
+  uilsb16_t cd_start_disk;
   // The number of central directory records on this disk.
   //
   // This implementation assumes that each archive spans a single
   // disk only. i.e, that num_records_on_disk == num_records.
-  uint16_t num_records_on_disk;
+  uilsb16_t num_records_on_disk;
   // The total number of central directory records.
-  uint16_t num_records;
+  uilsb16_t num_records;
   // The size of the central directory (in bytes).
-  uint32_t cd_size;
+  uilsb32_t cd_size;
   // The offset of the start of the central directory, relative
   // to the start of the file.
-  uint32_t cd_start_offset;
+  uilsb32_t cd_start_offset;
   // Length of the central directory comment.
-  uint16_t comment_length;
+  uilsb16_t comment_length;
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(EocdRecord);
 } __attribute__((packed));
@@ -96,45 +147,45 @@ struct CentralDirectoryRecord {
   static const uint32_t kSignature = 0x02014b50;
 
   // The start of record signature. Must be |kSignature|.
-  uint32_t record_signature;
+  uilsb32_t record_signature;
   // Tool version. Ignored by this implementation.
-  uint16_t version_made_by;
+  uilsb16_t version_made_by;
   // Tool version. Ignored by this implementation.
-  uint16_t version_needed;
+  uilsb16_t version_needed;
   // The "general purpose bit flags" for this entry. The only
   // flag value that we currently check for is the "data descriptor"
   // flag.
-  uint16_t gpb_flags;
+  uilsb16_t gpb_flags;
   // The compression method for this entry, one of |kCompressStored|
   // and |kCompressDeflated|.
-  uint16_t compression_method;
+  uilsb16_t compression_method;
   // The file modification time and date for this entry.
-  uint16_t last_mod_time;
-  uint16_t last_mod_date;
+  uilsb16_t last_mod_time;
+  uilsb16_t last_mod_date;
   // The CRC-32 checksum for this entry.
-  uint32_t crc32;
+  uilsb32_t crc32;
   // The compressed size (in bytes) of this entry.
-  uint32_t compressed_size;
+  uilsb32_t compressed_size;
   // The uncompressed size (in bytes) of this entry.
-  uint32_t uncompressed_size;
+  uilsb32_t uncompressed_size;
   // The length of the entry file name in bytes. The file name
   // will appear immediately after this record.
-  uint16_t file_name_length;
+  uilsb16_t file_name_length;
   // The length of the extra field info (in bytes). This data
   // will appear immediately after the entry file name.
-  uint16_t extra_field_length;
+  uilsb16_t extra_field_length;
   // The length of the entry comment (in bytes). This data will
   // appear immediately after the extra field.
-  uint16_t comment_length;
+  uilsb16_t comment_length;
   // The start disk for this entry. Ignored by this implementation).
-  uint16_t file_start_disk;
+  uilsb16_t file_start_disk;
   // File attributes. Ignored by this implementation.
-  uint16_t internal_file_attributes;
+  uilsb16_t internal_file_attributes;
   // File attributes. Ignored by this implementation.
-  uint32_t external_file_attributes;
+  uilsb32_t external_file_attributes;
   // The offset to the local file header for this entry, from the
   // beginning of this archive.
-  uint32_t local_file_header_offset;
+  uilsb32_t local_file_header_offset;
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(CentralDirectoryRecord);
 } __attribute__((packed));
@@ -147,31 +198,31 @@ struct LocalFileHeader {
   static const uint32_t kSignature = 0x04034b50;
 
   // The local file header signature, must be |kSignature|.
-  uint32_t lfh_signature;
+  uilsb32_t lfh_signature;
   // Tool version. Ignored by this implementation.
-  uint16_t version_needed;
+  uilsb16_t version_needed;
   // The "general purpose bit flags" for this entry. The only
   // flag value that we currently check for is the "data descriptor"
   // flag.
-  uint16_t gpb_flags;
+  uilsb16_t gpb_flags;
   // The compression method for this entry, one of |kCompressStored|
   // and |kCompressDeflated|.
-  uint16_t compression_method;
+  uilsb16_t compression_method;
   // The file modification time and date for this entry.
-  uint16_t last_mod_time;
-  uint16_t last_mod_date;
+  uilsb16_t last_mod_time;
+  uilsb16_t last_mod_date;
   // The CRC-32 checksum for this entry.
-  uint32_t crc32;
+  uilsb32_t crc32;
   // The compressed size (in bytes) of this entry.
-  uint32_t compressed_size;
+  uilsb32_t compressed_size;
   // The uncompressed size (in bytes) of this entry.
-  uint32_t uncompressed_size;
+  uilsb32_t uncompressed_size;
   // The length of the entry file name in bytes. The file name
   // will appear immediately after this record.
-  uint16_t file_name_length;
+  uilsb16_t file_name_length;
   // The length of the extra field info (in bytes). This data
   // will appear immediately after the entry file name.
-  uint16_t extra_field_length;
+  uilsb16_t extra_field_length;
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(LocalFileHeader);
 } __attribute__((packed));
@@ -181,11 +232,11 @@ struct DataDescriptor {
   static const uint32_t kOptSignature = 0x08074b50;
 
   // CRC-32 checksum of the entry.
-  uint32_t crc32;
+  uilsb32_t crc32;
   // Compressed size of the entry.
-  uint32_t compressed_size;
+  uilsb32_t compressed_size;
   // Uncompressed size of the entry.
-  uint32_t uncompressed_size;
+  uilsb32_t uncompressed_size;
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(DataDescriptor);
 } __attribute__((packed));
@@ -475,7 +526,7 @@ static int32_t MapCentralDirectory0(int fd, const char* debug_file_name,
   int i = read_amount - sizeof(EocdRecord);
   for (; i >= 0; i--) {
     if (scan_buffer[i] == 0x50 &&
-        ((*reinterpret_cast<uint32_t*>(&scan_buffer[i])) == EocdRecord::kSignature)) {
+        ((*reinterpret_cast<uilsb32_t*>(&scan_buffer[i])) == EocdRecord::kSignature)) {
       ALOGV("+++ Found EOCD at buf+%d", i);
       break;
     }
@@ -505,7 +556,7 @@ static int32_t MapCentralDirectory0(int fd, const char* debug_file_name,
    */
   if (eocd->cd_start_offset + eocd->cd_size > eocd_offset) {
     ALOGW("Zip: bad offsets (dir %" PRIu32 ", size %" PRIu32 ", eocd %" PRId64 ")",
-        eocd->cd_start_offset, eocd->cd_size, static_cast<int64_t>(eocd_offset));
+        static_cast<uint32_t>(eocd->cd_start_offset), static_cast<uint32_t>(eocd->cd_size), static_cast<int64_t>(eocd_offset));
     return kInvalidOffset;
   }
   if (eocd->num_records == 0) {
@@ -514,7 +565,7 @@ static int32_t MapCentralDirectory0(int fd, const char* debug_file_name,
   }
 
   ALOGV("+++ num_entries=%" PRIu32 "dir_size=%" PRIu32 " dir_offset=%" PRIu32,
-        eocd->num_records, eocd->cd_size, eocd->cd_start_offset);
+        static_cast<uint32_t>(eocd->num_records), static_cast<uint32_t>(eocd->cd_size), static_cast<uint32_t>(eocd->cd_start_offset));
 
   /*
    * It all looks good.  Create a mapping for the CD, and set the fields
@@ -725,7 +776,7 @@ static int32_t UpdateEntryFromDataDescriptor(int fd,
     return kIoError;
   }
 
-  const uint32_t ddSignature = *(reinterpret_cast<const uint32_t*>(ddBuf));
+  const uint32_t ddSignature = *(reinterpret_cast<const uilsb32_t*>(ddBuf));
   const uint16_t offset = (ddSignature == DataDescriptor::kOptSignature) ? 4 : 0;
   const DataDescriptor* descriptor = reinterpret_cast<const DataDescriptor*>(ddBuf + offset);
 
@@ -831,7 +882,7 @@ static int32_t FindEntry(const ZipArchive* archive, const int ent,
       ALOGW("Zip: size/crc32 mismatch. expected {%" PRIu32 ", %" PRIu32
         ", %" PRIx32 "}, was {%" PRIu32 ", %" PRIu32 ", %" PRIx32 "}",
         data->compressed_length, data->uncompressed_length, data->crc32,
-        lfh->compressed_size, lfh->uncompressed_size, lfh->crc32);
+        static_cast<uint32_t>(lfh->compressed_size), static_cast<uint32_t>(lfh->uncompressed_size), static_cast<uint32_t>(lfh->crc32));
       return kInconsistentInformation;
     }
   } else {
