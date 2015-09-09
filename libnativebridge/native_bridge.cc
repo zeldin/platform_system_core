@@ -43,14 +43,16 @@ static constexpr const char* kNativeBridgeInterfaceSymbol = "NativeBridgeItf";
 enum class NativeBridgeState {
   kNotSetup,                        // Initial state.
   kOpened,                          // After successful dlopen.
+  kPreInitialized,                  // After successful pre-initialization.
   kInitialized,                     // After successful initialization.
   kClosed                           // Closed or errors.
 };
 
-static const char* kNotSetupString = "kNotSetup";
-static const char* kOpenedString = "kOpened";
-static const char* kInitializedString = "kInitialized";
-static const char* kClosedString = "kClosed";
+static constexpr const char* kNotSetupString = "kNotSetup";
+static constexpr const char* kOpenedString = "kOpened";
+static constexpr const char* kPreInitializedString = "kPreInitialized";
+static constexpr const char* kInitializedString = "kInitialized";
+static constexpr const char* kClosedString = "kClosed";
 
 static const char* GetNativeBridgeStateString(NativeBridgeState state) {
   switch (state) {
@@ -59,6 +61,9 @@ static const char* GetNativeBridgeStateString(NativeBridgeState state) {
 
     case NativeBridgeState::kOpened:
       return kOpenedString;
+
+    case NativeBridgeState::kPreInitialized:
+      return kPreInitializedString;
 
     case NativeBridgeState::kInitialized:
       return kInitializedString;
@@ -78,14 +83,20 @@ static bool had_error = false;
 static void* native_bridge_handle = nullptr;
 // Pointer to the callbacks. Available as soon as LoadNativeBridge succeeds, but only initialized
 // later.
-static NativeBridgeCallbacks* callbacks = nullptr;
+static const NativeBridgeCallbacks* callbacks = nullptr;
 // Callbacks provided by the environment to the bridge. Passed to LoadNativeBridge.
 static const NativeBridgeRuntimeCallbacks* runtime_callbacks = nullptr;
 
-// The app's data directory.
-static char* app_data_dir = nullptr;
+// The app's code cache directory.
+static char* app_code_cache_dir = nullptr;
 
-static constexpr uint32_t kNativeBridgeCallbackVersion = 1;
+// Code cache directory (relative to the application private directory)
+// Ideally we'd like to call into framework to retrieve this name. However that's considered an
+// implementation detail and will require either hacks or consistent refactorings. We compromise
+// and hard code the directory name again here.
+static constexpr const char* kCodeCacheDir = "code_cache";
+
+static constexpr uint32_t kLibNativeBridgeVersion = 2;
 
 // Characters allowed in a native bridge filename. The first character must
 // be in [a-zA-Z] (expected 'l' for "libx"). The rest must be in [a-zA-Z0-9._-].
@@ -95,6 +106,13 @@ static bool CharacterAllowed(char c, bool first) {
   } else {
     return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9') ||
            (c == '.') || (c == '_') || (c == '-');
+  }
+}
+
+static void ReleaseAppCodeCacheDir() {
+  if (app_code_cache_dir != nullptr) {
+    delete[] app_code_cache_dir;
+    app_code_cache_dir = nullptr;
   }
 }
 
@@ -110,7 +128,9 @@ bool NativeBridgeNameAcceptable(const char* nb_library_filename) {
     // First character must be [a-zA-Z].
     if (!CharacterAllowed(*ptr, true))  {
       // Found an invalid fist character, don't accept.
-      ALOGE("Native bridge library %s has been rejected for first character %c", nb_library_filename, *ptr);
+      ALOGE("Native bridge library %s has been rejected for first character %c",
+            nb_library_filename,
+            *ptr);
       return false;
     } else {
       // For the rest, be more liberal.
@@ -128,8 +148,28 @@ bool NativeBridgeNameAcceptable(const char* nb_library_filename) {
   }
 }
 
-static bool VersionCheck(NativeBridgeCallbacks* cb) {
-  return cb != nullptr && cb->version == kNativeBridgeCallbackVersion;
+static bool VersionCheck(const NativeBridgeCallbacks* cb) {
+  // Libnativebridge is now designed to be forward-compatible. So only "0" is an unsupported
+  // version.
+  if (cb == nullptr || cb->version == 0) {
+    return false;
+  }
+
+  // If this is a v2+ bridge, it may not be forwards- or backwards-compatible. Check.
+  if (cb->version >= 2) {
+    if (!callbacks->isCompatibleWith(kLibNativeBridgeVersion)) {
+      // TODO: Scan which version is supported, and fall back to handle it.
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static void CloseNativeBridge(bool with_error) {
+  state = NativeBridgeState::kClosed;
+  had_error |= with_error;
+  ReleaseAppCodeCacheDir();
 }
 
 bool LoadNativeBridge(const char* nb_library_filename,
@@ -149,12 +189,11 @@ bool LoadNativeBridge(const char* nb_library_filename,
   }
 
   if (nb_library_filename == nullptr || *nb_library_filename == 0) {
-    state = NativeBridgeState::kClosed;
-    return true;
+    CloseNativeBridge(false);
+    return false;
   } else {
     if (!NativeBridgeNameAcceptable(nb_library_filename)) {
-      state = NativeBridgeState::kClosed;
-      had_error = true;
+      CloseNativeBridge(true);
     } else {
       // Try to open the library.
       void* handle = dlopen(nb_library_filename, RTLD_LAZY);
@@ -178,8 +217,7 @@ bool LoadNativeBridge(const char* nb_library_filename,
       // Two failure conditions: could not find library (dlopen failed), or could not find native
       // bridge interface (dlsym failed). Both are an error and close the native bridge.
       if (callbacks == nullptr) {
-        had_error = true;
-        state = NativeBridgeState::kClosed;
+        CloseNativeBridge(true);
       } else {
         runtime_callbacks = runtime_cbs;
         state = NativeBridgeState::kOpened;
@@ -216,19 +254,32 @@ bool NeedsNativeBridge(const char* instruction_set) {
 template<typename T> void UNUSED(const T&) {}
 #endif
 
-void PreInitializeNativeBridge(const char* app_data_dir_in, const char* instruction_set) {
-  if (app_data_dir_in == nullptr) {
-    return;
+bool PreInitializeNativeBridge(const char* app_data_dir_in, const char* instruction_set) {
+  if (state != NativeBridgeState::kOpened) {
+    ALOGE("Invalid state: native bridge is expected to be opened.");
+    CloseNativeBridge(true);
+    return false;
   }
 
-  const size_t len = strlen(app_data_dir_in);
-  // Make a copy for us.
-  app_data_dir = new char[len];
-  strncpy(app_data_dir, app_data_dir_in, len);
+  if (app_data_dir_in == nullptr) {
+    ALOGE("Application private directory cannot be null.");
+    CloseNativeBridge(true);
+    return false;
+  }
+
+  // Create the path to the application code cache directory.
+  // The memory will be release after Initialization or when the native bridge is closed.
+  const size_t len = strlen(app_data_dir_in) + strlen(kCodeCacheDir) + 2; // '\0' + '/'
+  app_code_cache_dir = new char[len];
+  snprintf(app_code_cache_dir, len, "%s/%s", app_data_dir_in, kCodeCacheDir);
+
+  // Bind-mount /system/lib{,64}/<isa>/cpuinfo to /proc/cpuinfo.
+  // Failure is not fatal and will keep the native bridge in kPreInitialized.
+  state = NativeBridgeState::kPreInitialized;
 
 #ifndef __APPLE__
   if (instruction_set == nullptr) {
-    return;
+    return true;
   }
   size_t isa_len = strlen(instruction_set);
   if (isa_len > 10) {
@@ -237,20 +288,20 @@ void PreInitializeNativeBridge(const char* app_data_dir_in, const char* instruct
     // be another instruction set in the future.
     ALOGW("Instruction set %s is malformed, must be less than or equal to 10 characters.",
           instruction_set);
-    return;
+    return true;
   }
 
-  // Bind-mount /system/lib{,64}/<isa>/cpuinfo to /proc/cpuinfo. If the file does not exist, the
-  // mount command will fail, so we safe the extra file existence check...
+  // If the file does not exist, the mount command will fail,
+  // so we save the extra file existence check.
   char cpuinfo_path[1024];
 
-#ifdef HAVE_ANDROID_OS
+#if defined(__ANDROID__)
   snprintf(cpuinfo_path, sizeof(cpuinfo_path), "/system/lib"
 #ifdef __LP64__
       "64"
 #endif  // __LP64__
       "/%s/cpuinfo", instruction_set);
-#else   // !HAVE_ANDROID_OS
+#else   // !__ANDROID__
   // To be able to test on the host, we hardwire a relative path.
   snprintf(cpuinfo_path, sizeof(cpuinfo_path), "./cpuinfo");
 #endif
@@ -263,10 +314,12 @@ void PreInitializeNativeBridge(const char* app_data_dir_in, const char* instruct
                                nullptr)) == -1) {   // "Data."
     ALOGW("Failed to bind-mount %s as /proc/cpuinfo: %s", cpuinfo_path, strerror(errno));
   }
-#else
+#else  // __APPLE__
   UNUSED(instruction_set);
   ALOGW("Mac OS does not support bind-mounting. Host simulation of native bridge impossible.");
 #endif
+
+  return true;
 }
 
 static void SetCpuAbi(JNIEnv* env, jclass build_class, const char* field, const char* value) {
@@ -289,48 +342,8 @@ static void SetCpuAbi(JNIEnv* env, jclass build_class, const char* field, const 
   }
 }
 
-static void SetSupportedAbis(JNIEnv* env, jclass build_class, const char* field,
-                             const char* *values, int32_t value_count) {
-  if (value_count < 0) {
-    return;
-  }
-  if (values == nullptr && value_count > 0) {
-    ALOGW("More than zero values expected: %d.", value_count);
-    return;
-  }
-
-  jfieldID field_id = env->GetStaticFieldID(build_class, field, "[Ljava/lang/String;");
-  if (field_id != nullptr) {
-    // Create the array.
-    jobjectArray array = env->NewObjectArray(value_count, env->FindClass("java/lang/String"),
-                                             nullptr);
-    if (array == nullptr) {
-      env->ExceptionClear();
-      ALOGW("Could not create array.");
-      return;
-    }
-
-    // Fill the array.
-    for (int32_t i = 0; i < value_count; i++) {
-      jstring str = env->NewStringUTF(values[i]);
-      if (str == nullptr) {
-        env->ExceptionClear();
-        ALOGW("Could not create string %s.", values[i]);
-        return;
-      }
-
-      env->SetObjectArrayElement(array, i, str);
-    }
-
-    env->SetStaticObjectField(build_class, field_id, array);
-  } else {
-    env->ExceptionClear();
-    ALOGW("Could not find %s field.", field);
-  }
-}
-
 // Set up the environment for the bridged app.
-static void SetupEnvironment(NativeBridgeCallbacks* callbacks, JNIEnv* env, const char* isa) {
+static void SetupEnvironment(const NativeBridgeCallbacks* callbacks, JNIEnv* env, const char* isa) {
   // Need a JNIEnv* to do anything.
   if (env == nullptr) {
     ALOGW("No JNIEnv* to set up app environment.");
@@ -359,9 +372,6 @@ static void SetupEnvironment(NativeBridgeCallbacks* callbacks, JNIEnv* env, cons
     if (bclass_id != nullptr) {
       SetCpuAbi(env, bclass_id, "CPU_ABI", env_values->cpu_abi);
       SetCpuAbi(env, bclass_id, "CPU_ABI2", env_values->cpu_abi2);
-
-      SetSupportedAbis(env, bclass_id, "SUPPORTED_ABIS", env_values->supported_abis,
-                       env_values->abi_count);
     } else {
       // For example in a host test environment.
       env->ExceptionClear();
@@ -372,7 +382,7 @@ static void SetupEnvironment(NativeBridgeCallbacks* callbacks, JNIEnv* env, cons
   if (env_values->os_arch != nullptr) {
     jclass sclass_id = env->FindClass("java/lang/System");
     if (sclass_id != nullptr) {
-      jmethodID set_prop_id = env->GetStaticMethodID(sclass_id, "initUnchangeableSystemProperty",
+      jmethodID set_prop_id = env->GetStaticMethodID(sclass_id, "setUnchangeableSystemProperty",
           "(Ljava/lang/String;Ljava/lang/String;)V");
       if (set_prop_id != nullptr) {
         // Init os.arch to the value reqired by the apps running with native bridge.
@@ -380,7 +390,7 @@ static void SetupEnvironment(NativeBridgeCallbacks* callbacks, JNIEnv* env, cons
             env->NewStringUTF(env_values->os_arch));
       } else {
         env->ExceptionClear();
-        ALOGW("Could not find initUnchangeableSystemProperty method.");
+        ALOGW("Could not find System#setUnchangeableSystemProperty.");
       }
     } else {
       env->ExceptionClear();
@@ -396,20 +406,39 @@ bool InitializeNativeBridge(JNIEnv* env, const char* instruction_set) {
   // We expect only one place that calls InitializeNativeBridge: Runtime::DidForkFromZygote. At that
   // point we are not multi-threaded, so we do not need locking here.
 
-  if (state == NativeBridgeState::kOpened) {
-    // Try to initialize.
-    if (callbacks->initialize(runtime_callbacks, app_data_dir, instruction_set)) {
-      SetupEnvironment(callbacks, env, instruction_set);
-      state = NativeBridgeState::kInitialized;
-    } else {
-      // Unload the library.
-      dlclose(native_bridge_handle);
-      had_error = true;
-      state = NativeBridgeState::kClosed;
+  if (state == NativeBridgeState::kPreInitialized) {
+    // Check for code cache: if it doesn't exist try to create it.
+    struct stat st;
+    if (stat(app_code_cache_dir, &st) == -1) {
+      if (errno == ENOENT) {
+        if (mkdir(app_code_cache_dir, S_IRWXU | S_IRWXG | S_IXOTH) == -1) {
+          ALOGW("Cannot create code cache directory %s: %s.", app_code_cache_dir, strerror(errno));
+          ReleaseAppCodeCacheDir();
+        }
+      } else {
+        ALOGW("Cannot stat code cache directory %s: %s.", app_code_cache_dir, strerror(errno));
+        ReleaseAppCodeCacheDir();
+      }
+    } else if (!S_ISDIR(st.st_mode)) {
+      ALOGW("Code cache is not a directory %s.", app_code_cache_dir);
+      ReleaseAppCodeCacheDir();
+    }
+
+    // If we're still PreInitialized (dind't fail the code cache checks) try to initialize.
+    if (state == NativeBridgeState::kPreInitialized) {
+      if (callbacks->initialize(runtime_callbacks, app_code_cache_dir, instruction_set)) {
+        SetupEnvironment(callbacks, env, instruction_set);
+        state = NativeBridgeState::kInitialized;
+        // We no longer need the code cache path, release the memory.
+        ReleaseAppCodeCacheDir();
+      } else {
+        // Unload the library.
+        dlclose(native_bridge_handle);
+        CloseNativeBridge(true);
+      }
     }
   } else {
-    had_error = true;
-    state = NativeBridgeState::kClosed;
+    CloseNativeBridge(true);
   }
 
   return state == NativeBridgeState::kInitialized;
@@ -421,22 +450,22 @@ void UnloadNativeBridge() {
 
   switch(state) {
     case NativeBridgeState::kOpened:
+    case NativeBridgeState::kPreInitialized:
     case NativeBridgeState::kInitialized:
       // Unload.
       dlclose(native_bridge_handle);
+      CloseNativeBridge(false);
       break;
 
     case NativeBridgeState::kNotSetup:
       // Not even set up. Error.
-      had_error = true;
+      CloseNativeBridge(true);
       break;
 
     case NativeBridgeState::kClosed:
       // Ignore.
       break;
   }
-
-  state = NativeBridgeState::kClosed;
 }
 
 bool NativeBridgeError() {
@@ -444,7 +473,9 @@ bool NativeBridgeError() {
 }
 
 bool NativeBridgeAvailable() {
-  return state == NativeBridgeState::kOpened || state == NativeBridgeState::kInitialized;
+  return state == NativeBridgeState::kOpened
+      || state == NativeBridgeState::kPreInitialized
+      || state == NativeBridgeState::kInitialized;
 }
 
 bool NativeBridgeInitialized() {
@@ -473,6 +504,20 @@ bool NativeBridgeIsSupported(const char* libpath) {
     return callbacks->isSupported(libpath);
   }
   return false;
+}
+
+uint32_t NativeBridgeGetVersion() {
+  if (NativeBridgeAvailable()) {
+    return callbacks->version;
+  }
+  return 0;
+}
+
+NativeBridgeSignalHandlerFn NativeBridgeGetSignalHandler(int signal) {
+  if (NativeBridgeInitialized() && callbacks->version >= 2) {
+    return callbacks->getSignalHandler(signal);
+  }
+  return nullptr;
 }
 
 };  // namespace android

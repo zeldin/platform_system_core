@@ -18,10 +18,18 @@
 #define __ADB_H
 
 #include <limits.h>
+#include <sys/types.h>
 
-#include "transport.h"  /* readx(), writex() */
+#include <base/macros.h>
 
-#define MAX_PAYLOAD 4096
+#include <string>
+
+#include "adb_trace.h"
+#include "fdevent.h"
+
+constexpr size_t MAX_PAYLOAD_V1 = 4 * 1024;
+constexpr size_t MAX_PAYLOAD_V2 = 256 * 1024;
+constexpr size_t MAX_PAYLOAD = MAX_PAYLOAD_V2;
 
 #define A_SYNC 0x434e5953
 #define A_CNXN 0x4e584e43
@@ -31,21 +39,20 @@
 #define A_WRTE 0x45545257
 #define A_AUTH 0x48545541
 
-#define A_VERSION 0x01000000        // ADB protocol version
+// ADB protocol version.
+#define A_VERSION 0x01000000
 
-#define ADB_VERSION_MAJOR 1         // Used for help/version information
-#define ADB_VERSION_MINOR 0         // Used for help/version information
+// Used for help/version information.
+#define ADB_VERSION_MAJOR 1
+#define ADB_VERSION_MINOR 0
 
-#define ADB_SERVER_VERSION    32    // Increment this when we want to force users to start a new adb server
+std::string adb_version();
 
-typedef struct amessage amessage;
-typedef struct apacket apacket;
-typedef struct asocket asocket;
-typedef struct alistener alistener;
-typedef struct aservice aservice;
-typedef struct atransport atransport;
-typedef struct adisconnect  adisconnect;
-typedef struct usb_handle usb_handle;
+// Increment this when we want to force users to start a new adb server.
+#define ADB_SERVER_VERSION 32
+
+class atransport;
+struct usb_handle;
 
 struct amessage {
     unsigned command;       /* command identifier constant      */
@@ -136,6 +143,8 @@ struct asocket {
 
         /* A socket is bound to atransport */
     atransport *transport;
+
+    size_t get_max_payload() const;
 };
 
 
@@ -153,63 +162,97 @@ struct  adisconnect
 };
 
 
-/* a transport object models the connection to a remote device or emulator
-** there is one transport per connected device/emulator. a "local transport"
-** connects through TCP (for the emulator), while a "usb transport" through
-** USB (for real devices)
-**
-** note that kTransportHost doesn't really correspond to a real transport
-** object, it's a special value used to indicate that a client wants to
-** connect to a service implemented within the ADB server itself.
-*/
-typedef enum transport_type {
-        kTransportUsb,
-        kTransportLocal,
-        kTransportAny,
-        kTransportHost,
-} transport_type;
+// A transport object models the connection to a remote device or emulator there
+// is one transport per connected device/emulator. A "local transport" connects
+// through TCP (for the emulator), while a "usb transport" through USB (for real
+// devices).
+//
+// Note that kTransportHost doesn't really correspond to a real transport
+// object, it's a special value used to indicate that a client wants to connect
+// to a service implemented within the ADB server itself.
+enum TransportType {
+    kTransportUsb,
+    kTransportLocal,
+    kTransportAny,
+    kTransportHost,
+};
 
 #define TOKEN_SIZE 20
 
-struct atransport
-{
-    atransport *next;
-    atransport *prev;
+enum ConnectionState {
+    kCsAny = -1,
+    kCsOffline = 0,
+    kCsBootloader,
+    kCsDevice,
+    kCsHost,
+    kCsRecovery,
+    kCsNoPerm,  // Insufficient permissions to communicate with the device.
+    kCsSideload,
+    kCsUnauthorized,
+};
 
-    int (*read_from_remote)(apacket *p, atransport *t);
-    int (*write_to_remote)(apacket *p, atransport *t);
-    void (*close)(atransport *t);
-    void (*kick)(atransport *t);
+class atransport {
+public:
+    // TODO(danalbert): We expose waaaaaaay too much stuff because this was
+    // historically just a struct, but making the whole thing a more idiomatic
+    // class in one go is a very large change. Given how bad our testing is,
+    // it's better to do this piece by piece.
 
-    int fd;
-    int transport_socket;
+    atransport() {
+        auth_fde = {};
+        transport_fde = {};
+        protocol_version = A_VERSION;
+        max_payload = MAX_PAYLOAD;
+    }
+
+    virtual ~atransport() {}
+
+    int (*read_from_remote)(apacket* p, atransport* t) = nullptr;
+    int (*write_to_remote)(apacket* p, atransport* t) = nullptr;
+    void (*close)(atransport* t) = nullptr;
+    void (*kick)(atransport* t) = nullptr;
+
+    int fd = -1;
+    int transport_socket = -1;
     fdevent transport_fde;
-    int ref_count;
-    unsigned sync_token;
-    int connection_state;
-    int online;
-    transport_type type;
+    int ref_count = 0;
+    uint32_t sync_token = 0;
+    ConnectionState connection_state = kCsOffline;
+    bool online = false;
+    TransportType type = kTransportAny;
 
-        /* usb handle or socket fd as needed */
-    usb_handle *usb;
-    int sfd;
+    // USB handle or socket fd as needed.
+    usb_handle* usb = nullptr;
+    int sfd = -1;
 
-        /* used to identify transports for clients */
-    char *serial;
-    char *product;
-    char *model;
-    char *device;
-    char *devpath;
-    int adb_port; // Use for emulators (local transport)
+    // Used to identify transports for clients.
+    char* serial = nullptr;
+    char* product = nullptr;
+    char* model = nullptr;
+    char* device = nullptr;
+    char* devpath = nullptr;
+    int adb_port = -1;  // Use for emulators (local transport)
+    bool kicked = false;
 
-        /* a list of adisconnect callbacks called when the transport is kicked */
-    int          kicked;
-    adisconnect  disconnects;
+    // A list of adisconnect callbacks called when the transport is kicked.
+    adisconnect disconnects = {};
 
-    void *key;
-    unsigned char token[TOKEN_SIZE];
+    void* key = nullptr;
+    unsigned char token[TOKEN_SIZE] = {};
     fdevent auth_fde;
-    unsigned failed_auth_attempts;
+    size_t failed_auth_attempts = 0;
+
+    const char* connection_state_name() const;
+
+    void update_version(int version, size_t payload);
+    int get_protocol_version() const;
+    size_t get_max_payload() const;
+
+private:
+    int protocol_version;
+    size_t max_payload;
+
+    DISALLOW_COPY_AND_ASSIGN(atransport);
 };
 
 
@@ -230,8 +273,8 @@ struct alistener
     fdevent fde;
     int fd;
 
-    const char *local_name;
-    const char *connect_to;
+    char *local_name;
+    char *connect_to;
     atransport *transport;
     adisconnect  disconnect;
 };
@@ -244,8 +287,6 @@ void install_local_socket(asocket *s);
 void remove_socket(asocket *s);
 void close_all_sockets(atransport *t);
 
-#define  LOCAL_CLIENT_PREFIX  "emulator-"
-
 asocket *create_local_socket(int fd);
 asocket *create_local_service_socket(const char *destination);
 
@@ -257,56 +298,18 @@ void fatal(const char *fmt, ...);
 void fatal_errno(const char *fmt, ...);
 
 void handle_packet(apacket *p, atransport *t);
-void send_packet(apacket *p, atransport *t);
 
 void get_my_path(char *s, size_t maxLen);
 int launch_server(int server_port);
-int adb_main(int is_daemon, int server_port);
-
-
-/* transports are ref-counted
-** get_device_transport does an acquire on your behalf before returning
-*/
-void init_transport_registration(void);
-int  list_transports(char *buf, size_t  bufsize, int long_listing);
-void update_transports(void);
-
-asocket*  create_device_tracker(void);
-
-/* Obtain a transport from the available transports.
-** If state is != CS_ANY, only transports in that state are considered.
-** If serial is non-NULL then only the device with that serial will be chosen.
-** If no suitable transport is found, error is set.
-*/
-atransport *acquire_one_transport(int state, transport_type ttype, const char* serial, char **error_out);
-void   add_transport_disconnect( atransport*  t, adisconnect*  dis );
-void   remove_transport_disconnect( atransport*  t, adisconnect*  dis );
-void   run_transport_disconnects( atransport*  t );
-void   kick_transport( atransport*  t );
+int adb_main(int is_daemon, int server_port, int ack_reply_fd);
 
 /* initialize a transport object's func pointers and state */
 #if ADB_HOST
 int get_available_local_transport_index();
 #endif
 int  init_socket_transport(atransport *t, int s, int port, int local);
-void init_usb_transport(atransport *t, usb_handle *usb, int state);
+void init_usb_transport(atransport *t, usb_handle *usb, ConnectionState state);
 
-/* for MacOS X cleanup */
-void close_usb_devices();
-
-/* cause new transports to be init'd and added to the list */
-int register_socket_transport(int s, const char *serial, int port, int local);
-
-/* these should only be used for the "adb disconnect" command */
-void unregister_transport(atransport *t);
-void unregister_all_tcp_transports();
-
-void register_usb_transport(usb_handle *h, const char *serial, const char *devpath, unsigned writeable);
-
-/* this should only be used for transports with connection_state == CS_NOPERM */
-void unregister_usb_transport(usb_handle *usb);
-
-atransport *find_transport(const char *serial);
 #if ADB_HOST
 atransport* find_emulator_transport_by_adb_port(int adb_port);
 #endif
@@ -323,98 +326,19 @@ asocket*  create_jdwp_tracker_service_socket();
 int       create_jdwp_connection_fd(int  jdwp_pid);
 #endif
 
-int handle_forward_request(const char* service, transport_type ttype, char* serial, int reply_fd);
+int handle_forward_request(const char* service, TransportType type, const char* serial, int reply_fd);
 
 #if !ADB_HOST
 void framebuffer_service(int fd, void *cookie);
-void remount_service(int fd, void *cookie);
+void set_verity_enabled_state_service(int fd, void* cookie);
 #endif
 
 /* packet allocator */
 apacket *get_apacket(void);
 void put_apacket(apacket *p);
 
-int check_header(apacket *p);
-int check_data(apacket *p);
-
-/* define ADB_TRACE to 1 to enable tracing support, or 0 to disable it */
-
-#define  ADB_TRACE    1
-
-/* IMPORTANT: if you change the following list, don't
- * forget to update the corresponding 'tags' table in
- * the adb_trace_init() function implemented in adb.c
- */
-typedef enum {
-    TRACE_ADB = 0,   /* 0x001 */
-    TRACE_SOCKETS,
-    TRACE_PACKETS,
-    TRACE_TRANSPORT,
-    TRACE_RWX,       /* 0x010 */
-    TRACE_USB,
-    TRACE_SYNC,
-    TRACE_SYSDEPS,
-    TRACE_JDWP,      /* 0x100 */
-    TRACE_SERVICES,
-    TRACE_AUTH,
-} AdbTrace;
-
-#if ADB_TRACE
-
-#if !ADB_HOST
-/*
- * When running inside the emulator, guest's adbd can connect to 'adb-debug'
- * qemud service that can display adb trace messages (on condition that emulator
- * has been started with '-debug adb' option).
- */
-
-/* Delivers a trace message to the emulator via QEMU pipe. */
-void adb_qemu_trace(const char* fmt, ...);
-/* Macro to use to send ADB trace messages to the emulator. */
-#define DQ(...)    adb_qemu_trace(__VA_ARGS__)
-#else
-#define DQ(...) ((void)0)
-#endif  /* !ADB_HOST */
-
-  extern int     adb_trace_mask;
-  extern unsigned char    adb_trace_output_count;
-  void    adb_trace_init(void);
-
-#  define ADB_TRACING  ((adb_trace_mask & (1 << TRACE_TAG)) != 0)
-
-  /* you must define TRACE_TAG before using this macro */
-#  define  D(...)                                      \
-        do {                                           \
-            if (ADB_TRACING) {                         \
-                int save_errno = errno;                \
-                adb_mutex_lock(&D_lock);               \
-                fprintf(stderr, "%s::%s():",           \
-                        __FILE__, __FUNCTION__);       \
-                errno = save_errno;                    \
-                fprintf(stderr, __VA_ARGS__ );         \
-                fflush(stderr);                        \
-                adb_mutex_unlock(&D_lock);             \
-                errno = save_errno;                    \
-           }                                           \
-        } while (0)
-#  define  DR(...)                                     \
-        do {                                           \
-            if (ADB_TRACING) {                         \
-                int save_errno = errno;                \
-                adb_mutex_lock(&D_lock);               \
-                errno = save_errno;                    \
-                fprintf(stderr, __VA_ARGS__ );         \
-                fflush(stderr);                        \
-                adb_mutex_unlock(&D_lock);             \
-                errno = save_errno;                    \
-           }                                           \
-        } while (0)
-#else
-#  define  D(...)          ((void)0)
-#  define  DR(...)         ((void)0)
-#  define  ADB_TRACING     0
-#endif /* ADB_TRACE */
-
+// Define it if you want to dump packets.
+#define DEBUG_PACKETS 0
 
 #if !DEBUG_PACKETS
 #define print_packet(tag,p) do {} while (0)
@@ -437,12 +361,11 @@ void adb_qemu_trace(const char* fmt, ...);
 
 
 void local_init(int port);
-int  local_connect(int  port);
-int  local_connect_arbitrary_ports(int console_port, int adb_port);
+void local_connect(int port);
+int  local_connect_arbitrary_ports(int console_port, int adb_port, std::string* error);
 
 /* usb host/client interface */
 void usb_init();
-void usb_cleanup();
 int usb_write(usb_handle *h, const void *data, int len);
 int usb_read(usb_handle *h, void *data, int len);
 int usb_close(usb_handle *h);
@@ -453,28 +376,14 @@ void usb_kick(usb_handle *h);
 int is_adb_interface(int vid, int pid, int usb_class, int usb_subclass, int usb_protocol);
 #endif
 
-unsigned host_to_le32(unsigned n);
-int adb_commandline(int argc, char **argv);
+int adb_commandline(int argc, const char **argv);
 
-int connection_state(atransport *t);
+ConnectionState connection_state(atransport *t);
 
-#define CS_ANY       -1
-#define CS_OFFLINE    0
-#define CS_BOOTLOADER 1
-#define CS_DEVICE     2
-#define CS_HOST       3
-#define CS_RECOVERY   4
-#define CS_NOPERM     5 /* Insufficient permissions to communicate with the device */
-#define CS_SIDELOAD   6
-#define CS_UNAUTHORIZED 7
-
-extern int HOST;
+extern const char *adb_device_banner;
+#if !ADB_HOST
 extern int SHELL_EXIT_NOTIFY_FD;
-
-typedef enum {
-    SUBPROC_PTY = 0,
-    SUBPROC_RAW = 1,
-} subproc_mode;
+#endif // !ADB_HOST
 
 #define CHUNK_SIZE (64*1024)
 
@@ -489,7 +398,11 @@ typedef enum {
 #define USB_FFS_ADB_IN    USB_FFS_ADB_EP(ep2)
 #endif
 
-int sendfailmsg(int fd, const char *reason);
-int handle_host_request(char *service, transport_type ttype, char* serial, int reply_fd, asocket *s);
+int handle_host_request(const char* service, TransportType type, const char* serial, int reply_fd, asocket *s);
+
+void handle_online(atransport *t);
+void handle_offline(atransport *t);
+
+void send_connect(atransport *t);
 
 #endif

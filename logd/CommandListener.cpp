@@ -33,9 +33,8 @@
 #include "LogCommand.h"
 
 CommandListener::CommandListener(LogBuffer *buf, LogReader * /*reader*/,
-                                 LogListener * /*swl*/)
-        : FrameworkListener(getLogSocket())
-        , mBuf(*buf) {
+                                 LogListener * /*swl*/) :
+        FrameworkListener(getLogSocket()) {
     // registerCmd(new ShutdownCmd(buf, writer, swl));
     registerCmd(new ClearCmd(buf));
     registerCmd(new GetBufSizeCmd(buf));
@@ -44,15 +43,15 @@ CommandListener::CommandListener(LogBuffer *buf, LogReader * /*reader*/,
     registerCmd(new GetStatisticsCmd(buf));
     registerCmd(new SetPruneListCmd(buf));
     registerCmd(new GetPruneListCmd(buf));
+    registerCmd(new ReinitCmd());
 }
 
-CommandListener::ShutdownCmd::ShutdownCmd(LogBuffer *buf, LogReader *reader,
-                                          LogListener *swl)
-        : LogCommand("shutdown")
-        , mBuf(*buf)
-        , mReader(*reader)
-        , mSwl(*swl)
-{ }
+CommandListener::ShutdownCmd::ShutdownCmd(LogReader *reader,
+                                          LogListener *swl) :
+        LogCommand("shutdown"),
+        mReader(*reader),
+        mSwl(*swl) {
+}
 
 int CommandListener::ShutdownCmd::runCommand(SocketClient * /*cli*/,
                                              int /*argc*/,
@@ -62,13 +61,17 @@ int CommandListener::ShutdownCmd::runCommand(SocketClient * /*cli*/,
     exit(0);
 }
 
-CommandListener::ClearCmd::ClearCmd(LogBuffer *buf)
-        : LogCommand("clear")
-        , mBuf(*buf)
-{ }
+CommandListener::ClearCmd::ClearCmd(LogBuffer *buf) :
+        LogCommand("clear"),
+        mBuf(*buf) {
+}
 
 static void setname() {
-    prctl(PR_SET_NAME, "logd.control");
+    static bool name_set;
+    if (!name_set) {
+        prctl(PR_SET_NAME, "logd.control");
+        name_set = true;
+    }
 }
 
 int CommandListener::ClearCmd::runCommand(SocketClient *cli,
@@ -95,10 +98,10 @@ int CommandListener::ClearCmd::runCommand(SocketClient *cli,
     return 0;
 }
 
-CommandListener::GetBufSizeCmd::GetBufSizeCmd(LogBuffer *buf)
-        : LogCommand("getLogSize")
-        , mBuf(*buf)
-{ }
+CommandListener::GetBufSizeCmd::GetBufSizeCmd(LogBuffer *buf) :
+        LogCommand("getLogSize"),
+        mBuf(*buf) {
+}
 
 int CommandListener::GetBufSizeCmd::runCommand(SocketClient *cli,
                                          int argc, char **argv) {
@@ -121,10 +124,10 @@ int CommandListener::GetBufSizeCmd::runCommand(SocketClient *cli,
     return 0;
 }
 
-CommandListener::SetBufSizeCmd::SetBufSizeCmd(LogBuffer *buf)
-        : LogCommand("setLogSize")
-        , mBuf(*buf)
-{ }
+CommandListener::SetBufSizeCmd::SetBufSizeCmd(LogBuffer *buf) :
+        LogCommand("setLogSize"),
+        mBuf(*buf) {
+}
 
 int CommandListener::SetBufSizeCmd::runCommand(SocketClient *cli,
                                          int argc, char **argv) {
@@ -155,10 +158,10 @@ int CommandListener::SetBufSizeCmd::runCommand(SocketClient *cli,
     return 0;
 }
 
-CommandListener::GetBufSizeUsedCmd::GetBufSizeUsedCmd(LogBuffer *buf)
-        : LogCommand("getLogSizeUsed")
-        , mBuf(*buf)
-{ }
+CommandListener::GetBufSizeUsedCmd::GetBufSizeUsedCmd(LogBuffer *buf) :
+        LogCommand("getLogSizeUsed"),
+        mBuf(*buf) {
+}
 
 int CommandListener::GetBufSizeUsedCmd::runCommand(SocketClient *cli,
                                          int argc, char **argv) {
@@ -181,10 +184,10 @@ int CommandListener::GetBufSizeUsedCmd::runCommand(SocketClient *cli,
     return 0;
 }
 
-CommandListener::GetStatisticsCmd::GetStatisticsCmd(LogBuffer *buf)
-        : LogCommand("getStatistics")
-        , mBuf(*buf)
-{ }
+CommandListener::GetStatisticsCmd::GetStatisticsCmd(LogBuffer *buf) :
+        LogCommand("getStatistics"),
+        mBuf(*buf) {
+}
 
 static void package_string(char **strp) {
     const char *a = *strp;
@@ -238,10 +241,10 @@ int CommandListener::GetStatisticsCmd::runCommand(SocketClient *cli,
     return 0;
 }
 
-CommandListener::GetPruneListCmd::GetPruneListCmd(LogBuffer *buf)
-        : LogCommand("getPruneList")
-        , mBuf(*buf)
-{ }
+CommandListener::GetPruneListCmd::GetPruneListCmd(LogBuffer *buf) :
+        LogCommand("getPruneList"),
+        mBuf(*buf) {
+}
 
 int CommandListener::GetPruneListCmd::runCommand(SocketClient *cli,
                                          int /*argc*/, char ** /*argv*/) {
@@ -258,10 +261,10 @@ int CommandListener::GetPruneListCmd::runCommand(SocketClient *cli,
     return 0;
 }
 
-CommandListener::SetPruneListCmd::SetPruneListCmd(LogBuffer *buf)
-        : LogCommand("setPruneList")
-        , mBuf(*buf)
-{ }
+CommandListener::SetPruneListCmd::SetPruneListCmd(LogBuffer *buf) :
+        LogCommand("setPruneList"),
+        mBuf(*buf) {
+}
 
 int CommandListener::SetPruneListCmd::runCommand(SocketClient *cli,
                                          int argc, char **argv) {
@@ -290,6 +293,20 @@ int CommandListener::SetPruneListCmd::runCommand(SocketClient *cli,
         cli->sendMsg("Invalid");
         return 0;
     }
+
+    cli->sendMsg("success");
+
+    return 0;
+}
+
+CommandListener::ReinitCmd::ReinitCmd() : LogCommand("reinit") {
+}
+
+int CommandListener::ReinitCmd::runCommand(SocketClient *cli,
+                                         int /*argc*/, char ** /*argv*/) {
+    setname();
+
+    reinit_signal_handler(SIGHUP);
 
     cli->sendMsg("success");
 

@@ -23,7 +23,7 @@
 #include <errno.h>
 #include <stddef.h>
 
-#ifdef HAVE_WINSOCK
+#if defined(_WIN32)
 
 int socket_local_server(const char *name, int namespaceId, int type)
 {
@@ -31,7 +31,7 @@ int socket_local_server(const char *name, int namespaceId, int type)
     return -1;
 }
 
-#else /* !HAVE_WINSOCK */
+#else /* !_WIN32 */
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -66,7 +66,7 @@ int socket_local_server_bind(int s, const char *name, int namespaceId)
     }
 
     /* basically: if this is a filesystem path, unlink first */
-#ifndef HAVE_LINUX_LOCAL_SOCKET_NAMESPACE
+#if !defined(__linux__)
     if (1) {
 #else
     if (namespaceId == ANDROID_SOCKET_NAMESPACE_RESERVED
@@ -123,4 +123,4 @@ int socket_local_server(const char *name, int namespace, int type)
     return s;
 }
 
-#endif /* !HAVE_WINSOCK */
+#endif /* !_WIN32 */

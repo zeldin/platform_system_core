@@ -144,6 +144,8 @@ typedef enum {
     PERM_ANDROID_DATA,
     /* This node is "/Android/obb" */
     PERM_ANDROID_OBB,
+    /* This node is "/Android/media" */
+    PERM_ANDROID_MEDIA,
     /* This node is "/Android/user" */
     PERM_ANDROID_USER,
 } perm_t;
@@ -167,6 +169,11 @@ struct node {
     __u32 refcount;
     __u64 nid;
     __u64 gen;
+    /*
+     * The inode number for this FUSE node. Note that this isn't stable across
+     * multiple invocations of the FUSE daemon.
+     */
+    __u32 ino;
 
     /* State derived based on current position in hierarchy. */
     perm_t perm;
@@ -192,6 +199,8 @@ struct node {
      * position. Used to support things like OBB. */
     char* graft_path;
     size_t graft_pathlen;
+
+    bool deleted;
 };
 
 static int str_hash(void *key) {
@@ -223,6 +232,25 @@ struct fuse {
     struct node root;
     char obbpath[PATH_MAX];
 
+    /* Used to allocate unique inode numbers for fuse nodes. We use
+     * a simple counter based scheme where inode numbers from deleted
+     * nodes aren't reused. Note that inode allocations are not stable
+     * across multiple invocation of the sdcard daemon, but that shouldn't
+     * be a huge problem in practice.
+     *
+     * Note that we restrict inodes to 32 bit unsigned integers to prevent
+     * truncation on 32 bit processes when unsigned long long stat.st_ino is
+     * assigned to an unsigned long ino_t type in an LP32 process.
+     *
+     * Also note that fuse_attr and fuse_dirent inode values are 64 bits wide
+     * on both LP32 and LP64, but the fuse kernel code doesn't squash 64 bit
+     * inode numbers into 32 bit values on 64 bit kernels (see fuse_squash_ino
+     * in fs/fuse/inode.c).
+     *
+     * Accesses must be guarded by |lock|.
+     */
+    __u32 inode_ctr;
+
     Hashmap* package_to_appid;
     Hashmap* appid_with_rw;
 };
@@ -236,7 +264,7 @@ struct fuse_handler {
      * buffer at the same time.  This allows us to share the underlying storage. */
     union {
         __u8 request_buffer[MAX_REQUEST_SIZE];
-        __u8 read_buffer[MAX_READ + PAGESIZE];
+        __u8 read_buffer[MAX_READ + PAGE_SIZE];
     };
 };
 
@@ -386,15 +414,15 @@ static char* find_file_within(const char* path, const char* name,
 
 static void attr_from_stat(struct fuse_attr *attr, const struct stat *s, const struct node* node)
 {
-    attr->ino = node->nid;
+    attr->ino = node->ino;
     attr->size = s->st_size;
     attr->blocks = s->st_blocks;
-    attr->atime = s->st_atime;
-    attr->mtime = s->st_mtime;
-    attr->ctime = s->st_ctime;
-    attr->atimensec = s->st_atime_nsec;
-    attr->mtimensec = s->st_mtime_nsec;
-    attr->ctimensec = s->st_ctime_nsec;
+    attr->atime = s->st_atim.tv_sec;
+    attr->mtime = s->st_mtim.tv_sec;
+    attr->ctime = s->st_ctim.tv_sec;
+    attr->atimensec = s->st_atim.tv_nsec;
+    attr->mtimensec = s->st_mtim.tv_nsec;
+    attr->ctimensec = s->st_ctim.tv_nsec;
     attr->mode = s->st_mode;
     attr->nlink = s->st_nlink;
 
@@ -480,6 +508,10 @@ static void derive_permissions_locked(struct fuse* fuse, struct node *parent,
             /* Single OBB directory is always shared */
             node->graft_path = fuse->obbpath;
             node->graft_pathlen = strlen(fuse->obbpath);
+        } else if (!strcasecmp(node->name, "media")) {
+            /* App-specific directories inside; let anyone traverse */
+            node->perm = PERM_ANDROID_MEDIA;
+            node->mode = 0771;
         } else if (!strcasecmp(node->name, "user")) {
             /* User directories must only be accessible to system, protected
              * by sdcard_all. Zygote will bind mount the appropriate user-
@@ -491,6 +523,7 @@ static void derive_permissions_locked(struct fuse* fuse, struct node *parent,
         break;
     case PERM_ANDROID_DATA:
     case PERM_ANDROID_OBB:
+    case PERM_ANDROID_MEDIA:
         appid = (appid_t) (uintptr_t) hashmapGet(fuse->package_to_appid, node->name);
         if (appid != 0) {
             node->uid = multiuser_get_uid(parent->userid, appid);
@@ -569,6 +602,13 @@ struct node *create_node_locked(struct fuse* fuse,
     struct node *node;
     size_t namelen = strlen(name);
 
+    // Detect overflows in the inode counter. "4 billion nodes should be enough
+    // for everybody".
+    if (fuse->inode_ctr == 0) {
+        ERROR("No more inode numbers available");
+        return NULL;
+    }
+
     node = calloc(1, sizeof(struct node));
     if (!node) {
         return NULL;
@@ -590,7 +630,10 @@ struct node *create_node_locked(struct fuse* fuse,
     }
     node->namelen = namelen;
     node->nid = ptr_to_id(node);
+    node->ino = fuse->inode_ctr++;
     node->gen = fuse->next_generation++;
+
+    node->deleted = false;
 
     derive_permissions_locked(fuse, parent, node);
     acquire_node_locked(node);
@@ -665,7 +708,7 @@ static struct node *lookup_child_by_name_locked(struct node *node, const char *n
          * must be considered distinct even if they refer to the same
          * underlying file as otherwise operations such as "mv x x"
          * will not work because the source and target nodes are the same. */
-        if (!strcmp(name, node->name)) {
+        if (!strcmp(name, node->name) && !node->deleted) {
             return node;
         }
     }
@@ -694,6 +737,7 @@ static void fuse_init(struct fuse *fuse, int fd, const char *source_path,
     fuse->derive = derive;
     fuse->split_perms = split_perms;
     fuse->write_gid = write_gid;
+    fuse->inode_ctr = 1;
 
     memset(&fuse->root, 0, sizeof(fuse->root));
     fuse->root.nid = FUSE_ROOT_ID; /* 1 */
@@ -897,7 +941,9 @@ static int handle_setattr(struct fuse* fuse, struct fuse_handler* handler,
     if (!node) {
         return -ENOENT;
     }
-    if (!check_caller_access_to_node(fuse, hdr, node, W_OK, has_rw)) {
+
+    if (!(req->valid & FATTR_FH) &&
+            !check_caller_access_to_node(fuse, hdr, node, W_OK, has_rw)) {
         return -EACCES;
     }
 
@@ -1028,6 +1074,7 @@ static int handle_unlink(struct fuse* fuse, struct fuse_handler* handler,
 {
     bool has_rw;
     struct node* parent_node;
+    struct node* child_node;
     char parent_path[PATH_MAX];
     char child_path[PATH_MAX];
 
@@ -1049,6 +1096,12 @@ static int handle_unlink(struct fuse* fuse, struct fuse_handler* handler,
     if (unlink(child_path) < 0) {
         return -errno;
     }
+    pthread_mutex_lock(&fuse->lock);
+    child_node = lookup_child_by_name_locked(parent_node, name);
+    if (child_node) {
+        child_node->deleted = true;
+    }
+    pthread_mutex_unlock(&fuse->lock);
     return 0;
 }
 
@@ -1056,6 +1109,7 @@ static int handle_rmdir(struct fuse* fuse, struct fuse_handler* handler,
         const struct fuse_in_header* hdr, const char* name)
 {
     bool has_rw;
+    struct node* child_node;
     struct node* parent_node;
     char parent_path[PATH_MAX];
     char child_path[PATH_MAX];
@@ -1078,6 +1132,12 @@ static int handle_rmdir(struct fuse* fuse, struct fuse_handler* handler,
     if (rmdir(child_path) < 0) {
         return -errno;
     }
+    pthread_mutex_lock(&fuse->lock);
+    child_node = lookup_child_by_name_locked(parent_node, name);
+    if (child_node) {
+        child_node->deleted = true;
+    }
+    pthread_mutex_unlock(&fuse->lock);
     return 0;
 }
 
@@ -1222,7 +1282,7 @@ static int handle_read(struct fuse* fuse, struct fuse_handler* handler,
     __u32 size = req->size;
     __u64 offset = req->offset;
     int res;
-    __u8 *read_buffer = (__u8 *) ((uintptr_t)(handler->read_buffer + PAGESIZE) & ~((uintptr_t)PAGESIZE-1));
+    __u8 *read_buffer = (__u8 *) ((uintptr_t)(handler->read_buffer + PAGE_SIZE) & ~((uintptr_t)PAGE_SIZE-1));
 
     /* Don't access any other fields of hdr or req beyond this point, the read buffer
      * overlaps the request buffer and will clobber data in the request.  This
@@ -1248,7 +1308,7 @@ static int handle_write(struct fuse* fuse, struct fuse_handler* handler,
     struct fuse_write_out out;
     struct handle *h = id_to_ptr(req->fh);
     int res;
-    __u8 aligned_buffer[req->size] __attribute__((__aligned__(PAGESIZE)));
+    __u8 aligned_buffer[req->size] __attribute__((__aligned__(PAGE_SIZE)));
 
     if (req->flags & O_DIRECT) {
         memcpy(aligned_buffer, buffer, req->size);
@@ -1262,6 +1322,7 @@ static int handle_write(struct fuse* fuse, struct fuse_handler* handler,
         return -errno;
     }
     out.size = res;
+    out.padding = 0;
     fuse_reply(fuse, hdr->unique, &out, sizeof(out));
     return NO_STATUS;
 }
@@ -1814,7 +1875,7 @@ static int run(const char* source_path, const char* dest_path, uid_t uid,
     struct fuse fuse;
 
     /* cleanup from previous instance, if necessary */
-    umount2(dest_path, 2);
+    umount2(dest_path, MNT_DETACH);
 
     fd = open("/dev/fuse", O_RDWR);
     if (fd < 0){
@@ -1826,7 +1887,8 @@ static int run(const char* source_path, const char* dest_path, uid_t uid,
             "fd=%i,rootmode=40000,default_permissions,allow_other,user_id=%d,group_id=%d",
             fd, uid, gid);
 
-    res = mount("/dev/fuse", dest_path, "fuse", MS_NOSUID | MS_NODEV, opts);
+    res = mount("/dev/fuse", dest_path, "fuse", MS_NOSUID | MS_NODEV | MS_NOEXEC |
+            MS_NOATIME, opts);
     if (res < 0) {
         ERROR("cannot mount fuse filesystem: %s\n", strerror(errno));
         goto error;

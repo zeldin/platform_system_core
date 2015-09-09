@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#define LOG_TAG "DEBUG"
+
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,8 +28,11 @@
 #include <sys/types.h>
 #include <sys/ptrace.h>
 
+#include <memory>
+
 #include <backtrace/Backtrace.h>
-#include <UniquePtr.h>
+
+#include <log/log.h>
 
 #include "backtrace.h"
 
@@ -49,13 +54,13 @@ static void dump_process_header(log_t* log, pid_t pid) {
   struct tm tm;
   localtime_r(&t, &tm);
   char timestr[64];
-  _LOG(log, logtype::BACKTRACE, "\n\nABI: '%s'\n", ABI_STRING);
   strftime(timestr, sizeof(timestr), "%F %T", &tm);
-  _LOG(log, logtype::BACKTRACE, "\n----- pid %d at %s -----\n", pid, timestr);
+  _LOG(log, logtype::BACKTRACE, "\n\n----- pid %d at %s -----\n", pid, timestr);
 
   if (procname) {
     _LOG(log, logtype::BACKTRACE, "Cmd line: %s\n", procname);
   }
+  _LOG(log, logtype::BACKTRACE, "ABI: '%s'\n", ABI_STRING);
 }
 
 static void dump_process_footer(log_t* log, pid_t pid) {
@@ -88,15 +93,19 @@ static void dump_thread(
     return;
   }
 
-  wait_for_stop(tid, total_sleep_time_usec);
+  if (!attached && wait_for_sigstop(tid, total_sleep_time_usec, detach_failed) == -1) {
+    return;
+  }
 
-  UniquePtr<Backtrace> backtrace(Backtrace::Create(tid, BACKTRACE_CURRENT_THREAD));
+  std::unique_ptr<Backtrace> backtrace(Backtrace::Create(tid, BACKTRACE_CURRENT_THREAD));
   if (backtrace->Unwind(0)) {
     dump_backtrace_to_log(backtrace.get(), log, "  ");
+  } else {
+    ALOGE("Unwind failed: tid = %d", tid);
   }
 
   if (!attached && ptrace(PTRACE_DETACH, tid, 0, 0) != 0) {
-    _LOG(log, logtype::ERROR, "ptrace detach from %d failed: %s\n", tid, strerror(errno));
+    ALOGE("ptrace detach from %d failed: %s\n", tid, strerror(errno));
     *detach_failed = true;
   }
 }

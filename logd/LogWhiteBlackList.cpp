@@ -22,10 +22,8 @@
 
 // White and Black list
 
-Prune::Prune(uid_t uid, pid_t pid)
-        : mUid(uid)
-        , mPid(pid)
-{ }
+Prune::Prune(uid_t uid, pid_t pid) : mUid(uid), mPid(pid) {
+}
 
 int Prune::cmp(uid_t uid, pid_t pid) const {
     if ((mUid == uid_all) || (mUid == uid)) {
@@ -51,8 +49,7 @@ void Prune::format(char **strp) {
     }
 }
 
-PruneList::PruneList()
-        : mWorstUidEnabled(false) {
+PruneList::PruneList() : mWorstUidEnabled(true) {
     mNaughty.clear();
     mNice.clear();
 }
@@ -70,7 +67,7 @@ PruneList::~PruneList() {
 }
 
 int PruneList::init(char *str) {
-    mWorstUidEnabled = false;
+    mWorstUidEnabled = true;
     PruneCollection::iterator it;
     for (it = mNice.begin(); it != mNice.end();) {
         delete (*it);

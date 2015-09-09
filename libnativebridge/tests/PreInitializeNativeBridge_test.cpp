@@ -31,8 +31,9 @@ namespace android {
 static constexpr const char* kTestData = "PreInitializeNativeBridge test.";
 
 TEST_F(NativeBridgeTest, PreInitializeNativeBridge) {
-#ifndef __APPLE__         // Mac OS does not support bind-mount.
-#ifndef HAVE_ANDROID_OS   // Cannot write into the hard-wired location.
+    ASSERT_TRUE(LoadNativeBridge(kNativeBridgeLibrary, nullptr));
+#if !defined(__APPLE__)         // Mac OS does not support bind-mount.
+#if !defined(__ANDROID__)       // Cannot write into the hard-wired location.
     // Try to create our mount namespace.
     if (unshare(CLONE_NEWNS) != -1) {
         // Create a dummy file.
@@ -41,8 +42,7 @@ TEST_F(NativeBridgeTest, PreInitializeNativeBridge) {
         fprintf(cpuinfo, kTestData);
         fclose(cpuinfo);
 
-        // Call the setup.
-        PreInitializeNativeBridge("does not matter 1", "short 2");
+        ASSERT_TRUE(PreInitializeNativeBridge("does not matter 1", "short 2"));
 
         // Read /proc/cpuinfo
         FILE* proc_cpuinfo = fopen("/proc/cpuinfo", "r");

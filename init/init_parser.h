@@ -17,20 +17,16 @@
 #ifndef _INIT_INIT_PARSER_H_
 #define _INIT_INIT_PARSER_H_
 
+#include <string>
+#include <vector>
+
 #define INIT_PARSER_MAXARGS 64
 
-struct action;
+class Action;
 
-struct action *action_remove_queue_head(void);
-void action_add_queue_tail(struct action *act);
-void action_for_each_trigger(const char *trigger,
-                             void (*func)(struct action *act));
-int action_queue_empty(void);
-void queue_property_triggers(const char *name, const char *value);
-void queue_all_property_triggers();
-void queue_builtin_action(int (*func)(int nargs, char **args), char *name);
-
-int init_parse_config_file(const char *fn);
-int expand_props(char *dst, const char *src, int len);
+bool init_parse_config(const char* path);
+int expand_props(const std::string& src, std::string* dst);
+bool add_command_to_action(Action* action, const std::vector<std::string>& args,
+                           const std::string& filename, int line, std::string* err);
 
 #endif

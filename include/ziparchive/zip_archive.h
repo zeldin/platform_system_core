@@ -22,6 +22,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <sys/cdefs.h>
 #include <sys/types.h>
 #include <utils/Compat.h>
 
@@ -33,17 +34,33 @@ enum {
   kCompressDeflated   = 8,        // standard deflate
 };
 
-struct ZipEntryName {
+struct ZipString {
   const uint8_t* name;
   uint16_t name_length;
 
-  ZipEntryName() {}
+  ZipString() {}
 
   /*
    * entry_name has to be an c-style string with only ASCII characters.
    */
-  explicit ZipEntryName(const char* entry_name)
+  explicit ZipString(const char* entry_name)
       : name(reinterpret_cast<const uint8_t*>(entry_name)), name_length(strlen(entry_name)) {}
+
+  bool operator==(const ZipString& rhs) const {
+    return name && (name_length == rhs.name_length) &&
+        (memcmp(name, rhs.name, name_length) == 0);
+  }
+
+  bool StartsWith(const ZipString& prefix) const {
+    return name && (name_length >= prefix.name_length) &&
+        (memcmp(name, prefix.name, prefix.name_length) == 0);
+  }
+
+  bool EndsWith(const ZipString& suffix) const {
+    return name && (name_length >= suffix.name_length) &&
+        (memcmp(name + name_length - suffix.name_length, suffix.name,
+                suffix.name_length) == 0);
+  }
 };
 
 /*
@@ -101,6 +118,9 @@ int32_t OpenArchive(const char* fileName, ZipArchiveHandle* handle);
  * Sets handle to the value of the opaque handle for this file descriptor.
  * This handle must be released by calling CloseArchive with this handle.
  *
+ * If assume_ownership parameter is 'true' calling CloseArchive will close
+ * the file.
+ *
  * This function maps and scans the central directory and builds a table
  * of entries for future lookups.
  *
@@ -109,7 +129,7 @@ int32_t OpenArchive(const char* fileName, ZipArchiveHandle* handle);
  * Returns 0 on success, and negative values on failure.
  */
 int32_t OpenArchiveFd(const int fd, const char* debugFileName,
-                      ZipArchiveHandle *handle);
+                      ZipArchiveHandle *handle, bool assume_ownership = true);
 
 /*
  * Close archive, releasing resources associated with it. This will
@@ -133,7 +153,7 @@ void CloseArchive(ZipArchiveHandle handle);
  * and length, a call to VerifyCrcAndLengths must be made after entry data
  * has been processed.
  */
-int32_t FindEntry(const ZipArchiveHandle handle, const ZipEntryName& entryName,
+int32_t FindEntry(const ZipArchiveHandle handle, const ZipString& entryName,
                   ZipEntry* data);
 
 /*
@@ -144,13 +164,14 @@ int32_t FindEntry(const ZipArchiveHandle handle, const ZipEntryName& entryName,
  * calls to Next. All calls to StartIteration must be matched by a call to
  * EndIteration to free any allocated memory.
  *
- * This method also accepts an optional prefix to restrict iteration to
- * entry names that start with |optional_prefix|.
+ * This method also accepts optional prefix and suffix to restrict iteration to
+ * entry names that start with |optional_prefix| or end with |optional_suffix|.
  *
  * Returns 0 on success and negative values on failure.
  */
 int32_t StartIteration(ZipArchiveHandle handle, void** cookie_ptr,
-                       const ZipEntryName* optional_prefix);
+                       const ZipString* optional_prefix,
+                       const ZipString* optional_suffix);
 
 /*
  * Advance to the next element in the zipfile in iteration order.
@@ -158,7 +179,7 @@ int32_t StartIteration(ZipArchiveHandle handle, void** cookie_ptr,
  * Returns 0 on success, -1 if there are no more elements in this
  * archive and lower negative values on failure.
  */
-int32_t Next(void* cookie, ZipEntry* data, ZipEntryName *name);
+int32_t Next(void* cookie, ZipEntry* data, ZipString* name);
 
 /*
  * End iteration over all entries of a zip file and frees the memory allocated

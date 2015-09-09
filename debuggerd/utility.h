@@ -21,13 +21,17 @@
 #include <stdbool.h>
 #include <sys/types.h>
 
+#include <backtrace/Backtrace.h>
+
 // Figure out the abi based on defined macros.
 #if defined(__arm__)
 #define ABI_STRING "arm"
 #elif defined(__aarch64__)
 #define ABI_STRING "arm64"
-#elif defined(__mips__)
+#elif defined(__mips__) && !defined(__LP64__)
 #define ABI_STRING "mips"
+#elif defined(__mips__) && defined(__LP64__)
+#define ABI_STRING "mips64"
 #elif defined(__i386__)
 #define ABI_STRING "x86"
 #elif defined(__x86_64__)
@@ -55,7 +59,6 @@ struct log_t{
 
 // List of types of logs to simplify the logging decision in _LOG
 enum logtype {
-  ERROR,
   HEADER,
   THREAD,
   REGISTERS,
@@ -67,13 +70,12 @@ enum logtype {
   LOGS
 };
 
-/* Log information onto the tombstone. */
+// Log information onto the tombstone.
 void _LOG(log_t* log, logtype ltype, const char *fmt, ...)
         __attribute__ ((format(printf, 3, 4)));
 
-int wait_for_signal(pid_t tid, int* total_sleep_time_usec);
-void wait_for_stop(pid_t tid, int* total_sleep_time_usec);
+int wait_for_sigstop(pid_t, int*, bool*);
 
-void dump_memory(log_t* log, pid_t tid, uintptr_t addr);
+void dump_memory(log_t* log, Backtrace* backtrace, uintptr_t addr, const char* fmt, ...);
 
 #endif // _DEBUGGERD_UTILITY_H

@@ -35,12 +35,29 @@ static inline ssize_t pread64(int fd, void* buf, size_t nbytes, off64_t offset) 
 
 #endif /* __APPLE__ */
 
-#if HAVE_PRINTF_ZD
-#  define ZD "%zd"
-#  define ZD_TYPE ssize_t
+#if defined(_WIN32)
+#define O_CLOEXEC O_NOINHERIT
+#define O_NOFOLLOW 0
+#define DEFFILEMODE 0666
+#endif /* _WIN32 */
+
+#if defined(_WIN32)
+#define ZD "%ld"
+#define ZD_TYPE long
 #else
-#  define ZD "%ld"
-#  define ZD_TYPE long
+#define ZD "%zd"
+#define ZD_TYPE ssize_t
+#endif
+
+/*
+ * Needed for cases where something should be constexpr if possible, but not
+ * being constexpr is fine if in pre-C++11 code (such as a const static float
+ * member variable).
+ */
+#if __cplusplus >= 201103L
+#define CONSTEXPR constexpr
+#else
+#define CONSTEXPR
 #endif
 
 /*
@@ -56,6 +73,12 @@ static inline ssize_t pread64(int fd, void* buf, size_t nbytes, off64_t offset) 
         _rc = (exp);                       \
     } while (_rc == -1 && errno == EINTR); \
     _rc; })
+#endif
+
+#if defined(_WIN32)
+#define OS_PATH_SEPARATOR '\\'
+#else
+#define OS_PATH_SEPARATOR '/'
 #endif
 
 #endif /* __LIB_UTILS_COMPAT_H */

@@ -39,13 +39,10 @@ benchmark_src_files := \
 include $(CLEAR_VARS)
 LOCAL_MODULE := $(test_module_prefix)benchmarks
 LOCAL_MODULE_TAGS := $(test_tags)
-LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk
 LOCAL_CFLAGS += $(benchmark_c_flags)
 LOCAL_SHARED_LIBRARIES += liblog libm
 LOCAL_SRC_FILES := $(benchmark_src_files)
-LOCAL_MODULE_PATH := $(TARGET_OUT_DATA_NATIVE_TESTS)/$(LOCAL_MODULE)
-include external/stlport/libstlport.mk
-include $(BUILD_EXECUTABLE)
+include $(BUILD_NATIVE_TEST)
 
 # -----------------------------------------------------------------------------
 # Unit tests.
@@ -68,10 +65,6 @@ ifneq ($(wildcard $(LOCAL_PATH)/../../../../bionic/libc/bionic/libc_logging.cpp)
 test_src_files += \
     libc_test.cpp
 
-ifneq ($(TARGET_USES_LOGD),false)
-test_c_flags += -DTARGET_USES_LOGD
-endif
-
 endif
 
 # Build tests for the device (with .so). Run with:
@@ -79,8 +72,7 @@ endif
 include $(CLEAR_VARS)
 LOCAL_MODULE := $(test_module_prefix)unit-tests
 LOCAL_MODULE_TAGS := $(test_tags)
-LOCAL_ADDITIONAL_DEPENDENCIES := $(LOCAL_PATH)/Android.mk
 LOCAL_CFLAGS += $(test_c_flags)
-LOCAL_SHARED_LIBRARIES := liblog
+LOCAL_SHARED_LIBRARIES := liblog libcutils
 LOCAL_SRC_FILES := $(test_src_files)
 include $(BUILD_NATIVE_TEST)

@@ -32,16 +32,23 @@ static void maybe_abort() {
     }
 }
 
-static int smash_stack(int i __unused) {
+static char* smash_stack_dummy_buf;
+__attribute__ ((noinline)) static void smash_stack_dummy_function(volatile int* plen) {
+  smash_stack_dummy_buf[*plen] = 0;
+}
+
+// This must be marked with "__attribute__ ((noinline))", to ensure the
+// compiler generates the proper stack guards around this function.
+// Assign local array address to global variable to force stack guards.
+// Use another noinline function to corrupt the stack.
+__attribute__ ((noinline)) static int smash_stack(volatile int* plen) {
     printf("crasher: deliberately corrupting stack...\n");
-    // Unless there's a "big enough" buffer on the stack, gcc
-    // doesn't bother inserting checks.
-    char buf[8];
-    // If we don't write something relatively unpredictable
-    // into the buffer and then do something with it, gcc
-    // optimizes everything away and just returns a constant.
-    *(int*)(&buf[7]) = (uintptr_t) &buf[0];
-    return *(int*)(&buf[0]);
+
+    char buf[128];
+    smash_stack_dummy_buf = buf;
+    // This should corrupt stack guards and make process abort.
+    smash_stack_dummy_function(plen);
+    return 0;
 }
 
 static void* global = 0; // So GCC doesn't optimize the tail recursion out of overflow_stack.
@@ -59,7 +66,7 @@ static void *noisy(void *x)
     for(;;) {
         usleep(250*1000);
         write(2, &c, 1);
-        if(c == 'C') *((unsigned*) 0) = 42;
+        if(c == 'C') *((volatile unsigned*) 0) = 42;
     }
     return NULL;
 }
@@ -125,7 +132,8 @@ static int do_action(const char* arg)
     } else if (!strcmp(arg, "SIGSEGV-non-null")) {
         sigsegv_non_null();
     } else if (!strcmp(arg, "smash-stack")) {
-        return smash_stack(42);
+        volatile int len = 128;
+        return smash_stack(&len);
     } else if (!strcmp(arg, "stack-overflow")) {
         overflow_stack(NULL);
     } else if (!strcmp(arg, "nostack")) {
@@ -148,12 +156,6 @@ static int do_action(const char* arg)
         LOG_ALWAYS_FATAL_IF(true, "hello %s", "world");
     } else if (!strcmp(arg, "SIGFPE")) {
         raise(SIGFPE);
-        return EXIT_SUCCESS;
-    } else if (!strcmp(arg, "SIGPIPE")) {
-        int pipe_fds[2];
-        pipe(pipe_fds);
-        close(pipe_fds[0]);
-        write(pipe_fds[1], "oops", 4);
         return EXIT_SUCCESS;
     } else if (!strcmp(arg, "SIGTRAP")) {
         raise(SIGTRAP);
@@ -181,7 +183,6 @@ static int do_action(const char* arg)
     fprintf(stderr, "  LOG_ALWAYS_FATAL      call LOG_ALWAYS_FATAL\n");
     fprintf(stderr, "  LOG_ALWAYS_FATAL_IF   call LOG_ALWAYS_FATAL\n");
     fprintf(stderr, "  SIGFPE                cause a SIGFPE\n");
-    fprintf(stderr, "  SIGPIPE               cause a SIGPIPE\n");
     fprintf(stderr, "  SIGSEGV               cause a SIGSEGV at address 0x0 (synonym: crash)\n");
     fprintf(stderr, "  SIGSEGV-non-null      cause a SIGSEGV at a non-zero address\n");
     fprintf(stderr, "  SIGSEGV-unmapped      mmap/munmap a region of memory and then attempt to access it\n");

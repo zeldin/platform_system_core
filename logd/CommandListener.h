@@ -23,8 +23,10 @@
 #include "LogReader.h"
 #include "LogListener.h"
 
+// See main.cpp for implementation
+void reinit_signal_handler(int /*signal*/);
+
 class CommandListener : public FrameworkListener {
-    LogBuffer &mBuf;
 
 public:
     CommandListener(LogBuffer *buf, LogReader *reader, LogListener *swl);
@@ -34,12 +36,11 @@ private:
     static int getLogSocket();
 
     class ShutdownCmd : public LogCommand {
-        LogBuffer &mBuf;
         LogReader &mReader;
         LogListener &mSwl;
 
     public:
-        ShutdownCmd(LogBuffer *buf, LogReader *reader, LogListener *swl);
+        ShutdownCmd(LogReader *reader, LogListener *swl);
         virtual ~ShutdownCmd() {}
         int runCommand(SocketClient *c, int argc, char ** argv);
     };
@@ -60,6 +61,14 @@ private:
     LogBufferCmd(GetStatistics)
     LogBufferCmd(GetPruneList)
     LogBufferCmd(SetPruneList)
+
+    class ReinitCmd : public LogCommand {
+    public:
+        ReinitCmd();
+        virtual ~ReinitCmd() {}
+        int runCommand(SocketClient *c, int argc, char ** argv);
+    };
+
 };
 
 #endif

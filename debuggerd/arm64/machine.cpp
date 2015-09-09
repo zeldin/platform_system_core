@@ -15,52 +15,41 @@
  * limitations under the License.
  */
 
+#define LOG_TAG "DEBUG"
+
 #include <elf.h>
 #include <errno.h>
-#include <inttypes.h>
+#include <stdint.h>
 #include <string.h>
-#include <sys/types.h>
 #include <sys/ptrace.h>
-#include <sys/user.h>
 #include <sys/uio.h>
 
-#include "../utility.h"
-#include "../machine.h"
+#include <backtrace/Backtrace.h>
+#include <log/log.h>
 
-void dump_memory_and_code(log_t* log, pid_t tid) {
-    struct user_pt_regs regs;
-    struct iovec io;
-    io.iov_base = &regs;
-    io.iov_len = sizeof(regs);
+#include "machine.h"
+#include "utility.h"
 
-    if (ptrace(PTRACE_GETREGSET, tid, (void*)NT_PRSTATUS, &io) == -1) {
-        _LOG(log, logtype::ERROR, "%s: ptrace failed to get registers: %s\n",
-             __func__, strerror(errno));
-        return;
-    }
+void dump_memory_and_code(log_t* log, Backtrace* backtrace) {
+  struct user_pt_regs regs;
+  struct iovec io;
+  io.iov_base = &regs;
+  io.iov_len = sizeof(regs);
 
-    for (int reg = 0; reg < 31; reg++) {
-        uintptr_t addr = regs.regs[reg];
+  if (ptrace(PTRACE_GETREGSET, backtrace->Tid(), reinterpret_cast<void*>(NT_PRSTATUS), &io) == -1) {
+    ALOGE("ptrace failed to get registers: %s", strerror(errno));
+    return;
+  }
 
-        /*
-         * Don't bother if it looks like a small int or ~= null, or if
-         * it's in the kernel area.
-         */
-        if (addr < 4096 || addr >= (1UL<<63)) {
-            continue;
-        }
+  for (int reg = 0; reg < 31; reg++) {
+    dump_memory(log, backtrace, regs.regs[reg], "memory near x%d:", reg);
+  }
 
-        _LOG(log, logtype::MEMORY, "\nmemory near x%d:\n", reg);
-        dump_memory(log, tid, addr);
-    }
+  dump_memory(log, backtrace, static_cast<uintptr_t>(regs.pc), "code around pc:");
 
-    _LOG(log, logtype::MEMORY, "\ncode around pc:\n");
-    dump_memory(log, tid, (uintptr_t)regs.pc);
-
-    if (regs.pc != regs.sp) {
-        _LOG(log, logtype::MEMORY, "\ncode around sp:\n");
-        dump_memory(log, tid, (uintptr_t)regs.sp);
-    }
+  if (regs.pc != regs.sp) {
+    dump_memory(log, backtrace, static_cast<uintptr_t>(regs.sp), "code around sp:");
+  }
 }
 
 void dump_registers(log_t* log, pid_t tid) {
@@ -70,7 +59,7 @@ void dump_registers(log_t* log, pid_t tid) {
   io.iov_len = sizeof(r);
 
   if (ptrace(PTRACE_GETREGSET, tid, (void*) NT_PRSTATUS, (void*) &io) == -1) {
-    _LOG(log, logtype::ERROR, "ptrace error: %s\n", strerror(errno));
+    ALOGE("ptrace error: %s\n", strerror(errno));
     return;
   }
 
@@ -94,7 +83,7 @@ void dump_registers(log_t* log, pid_t tid) {
   io.iov_len = sizeof(f);
 
   if (ptrace(PTRACE_GETREGSET, tid, (void*) NT_PRFPREG, (void*) &io) == -1) {
-    _LOG(log, logtype::ERROR, "ptrace error: %s\n", strerror(errno));
+    ALOGE("ptrace error: %s\n", strerror(errno));
     return;
   }
 

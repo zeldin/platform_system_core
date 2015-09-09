@@ -22,7 +22,7 @@
 
 #include <cutils/sockets.h>
 
-#ifdef HAVE_WINSOCK
+#if defined(_WIN32)
 
 int socket_local_client(const char *name, int namespaceId, int type)
 {
@@ -30,7 +30,7 @@ int socket_local_client(const char *name, int namespaceId, int type)
     return -1;
 }
 
-#else /* !HAVE_WINSOCK */
+#else /* !_WIN32 */
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -52,7 +52,7 @@ int socket_make_sockaddr_un(const char *name, int namespaceId,
 
     switch (namespaceId) {
         case ANDROID_SOCKET_NAMESPACE_ABSTRACT:
-#ifdef HAVE_LINUX_LOCAL_SOCKET_NAMESPACE
+#if defined(__linux__)
             namelen  = strlen(name);
 
             // Test with length +1 for the *initial* '\0'.
@@ -67,7 +67,7 @@ int socket_make_sockaddr_un(const char *name, int namespaceId,
             
             p_addr->sun_path[0] = 0;
             memcpy(p_addr->sun_path + 1, name, namelen);
-#else /*HAVE_LINUX_LOCAL_SOCKET_NAMESPACE*/
+#else
             /* this OS doesn't have the Linux abstract namespace */
 
             namelen = strlen(name) + strlen(FILESYSTEM_SOCKET_PREFIX);
@@ -79,7 +79,7 @@ int socket_make_sockaddr_un(const char *name, int namespaceId,
 
             strcpy(p_addr->sun_path, FILESYSTEM_SOCKET_PREFIX);
             strcat(p_addr->sun_path, name);
-#endif /*HAVE_LINUX_LOCAL_SOCKET_NAMESPACE*/
+#endif
         break;
 
         case ANDROID_SOCKET_NAMESPACE_RESERVED:
@@ -165,4 +165,4 @@ int socket_local_client(const char *name, int namespaceId, int type)
     return s;
 }
 
-#endif /* !HAVE_WINSOCK */
+#endif /* !_WIN32 */

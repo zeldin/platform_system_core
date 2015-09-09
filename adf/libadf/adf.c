@@ -17,9 +17,11 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <malloc.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <linux/limits.h>
 
@@ -85,7 +87,6 @@ ssize_t adf_devices(adf_id_t **ids)
 int adf_device_open(adf_id_t id, int flags, struct adf_device *dev)
 {
     char filename[64];
-    int err;
 
     dev->id = id;
 

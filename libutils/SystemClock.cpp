@@ -19,7 +19,7 @@
  * System clock functions.
  */
 
-#ifdef HAVE_ANDROID_OS
+#if defined(__ANDROID__)
 #include <linux/ioctl.h>
 #include <linux/rtc.h>
 #include <utils/Atomic.h>
@@ -29,7 +29,6 @@
 #include <sys/time.h>
 #include <limits.h>
 #include <fcntl.h>
-#include <errno.h>
 #include <string.h>
 
 #include <utils/SystemClock.h>
@@ -68,7 +67,7 @@ int64_t elapsedRealtime()
  */
 #define DEBUG_TIMESTAMP         0
 
-#if DEBUG_TIMESTAMP && defined(ARCH_ARM)
+#if DEBUG_TIMESTAMP && defined(__arm__)
 static inline void checkTimeStamps(int64_t timestamp,
                                    int64_t volatile *prevTimestampPtr,
                                    int volatile *prevMethodPtr,
@@ -108,7 +107,7 @@ static inline void checkTimeStamps(int64_t timestamp,
  */
 int64_t elapsedRealtimeNano()
 {
-#ifdef HAVE_ANDROID_OS
+#if defined(__ANDROID__)
     struct timespec ts;
     int result;
     int64_t timestamp;

@@ -16,6 +16,7 @@
 
 #include <utils/String8.h>
 
+#include <utils/Compat.h>
 #include <utils/Log.h>
 #include <utils/Unicode.h>
 #include <utils/SharedBuffer.h>
@@ -406,6 +407,30 @@ ssize_t String8::find(const char* other, size_t start) const
     const char* s = mString+start;
     const char* p = strstr(s, other);
     return p ? p-mString : -1;
+}
+
+bool String8::removeAll(const char* other) {
+    ssize_t index = find(other);
+    if (index < 0) return false;
+
+    char* buf = lockBuffer(size());
+    if (!buf) return false; // out of memory
+
+    size_t skip = strlen(other);
+    size_t len = size();
+    size_t tail = index;
+    while (size_t(index) < len) {
+        ssize_t next = find(other, index + skip);
+        if (next < 0) {
+            next = len;
+        }
+
+        memmove(buf + tail, buf + index + skip, next - index - skip);
+        tail += next - index - skip;
+        index = next;
+    }
+    unlockBuffer(tail);
+    return true;
 }
 
 void String8::toLower()

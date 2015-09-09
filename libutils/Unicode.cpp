@@ -18,23 +18,16 @@
 
 #include <stddef.h>
 
-#ifdef HAVE_WINSOCK
+#if defined(_WIN32)
 # undef  nhtol
 # undef  htonl
 # undef  nhtos
 # undef  htons
 
-# ifdef HAVE_LITTLE_ENDIAN
-#  define ntohl(x)    ( ((x) << 24) | (((x) >> 24) & 255) | (((x) << 8) & 0xff0000) | (((x) >> 8) & 0xff00) )
-#  define htonl(x)    ntohl(x)
-#  define ntohs(x)    ( (((x) << 8) & 0xff00) | (((x) >> 8) & 255) )
-#  define htons(x)    ntohs(x)
-# else
-#  define ntohl(x)    (x)
-#  define htonl(x)    (x)
-#  define ntohs(x)    (x)
-#  define htons(x)    (x)
-# endif
+# define ntohl(x)    ( ((x) << 24) | (((x) >> 24) & 255) | (((x) << 8) & 0xff0000) | (((x) >> 8) & 0xff00) )
+# define htonl(x)    ntohl(x)
+# define ntohs(x)    ( (((x) << 8) & 0xff00) | (((x) >> 8) & 255) )
+# define htons(x)    ntohs(x)
 #else
 # include <netinet/in.h>
 #endif
@@ -47,8 +40,9 @@ static const char32_t kByteMark = 0x00000080;
 // Surrogates aren't valid for UTF-32 characters, so define some
 // constants that will let us screen them out.
 static const char32_t kUnicodeSurrogateHighStart  = 0x0000D800;
-static const char32_t kUnicodeSurrogateHighEnd    = 0x0000DBFF;
-static const char32_t kUnicodeSurrogateLowStart   = 0x0000DC00;
+// Unused, here for completeness:
+// static const char32_t kUnicodeSurrogateHighEnd = 0x0000DBFF;
+// static const char32_t kUnicodeSurrogateLowStart = 0x0000DC00;
 static const char32_t kUnicodeSurrogateLowEnd     = 0x0000DFFF;
 static const char32_t kUnicodeSurrogateStart      = kUnicodeSurrogateHighStart;
 static const char32_t kUnicodeSurrogateEnd        = kUnicodeSurrogateLowEnd;
@@ -342,7 +336,8 @@ void utf16_to_utf8(const char16_t* src, size_t src_len, char* dst)
     while (cur_utf16 < end_utf16) {
         char32_t utf32;
         // surrogate pairs
-        if ((*cur_utf16 & 0xFC00) == 0xD800) {
+        if((*cur_utf16 & 0xFC00) == 0xD800 && (cur_utf16 + 1) < end_utf16
+                && (*(cur_utf16 + 1) & 0xFC00) == 0xDC00) {
             utf32 = (*cur_utf16++ - 0xD800) << 10;
             utf32 |= *cur_utf16++ - 0xDC00;
             utf32 += 0x10000;
