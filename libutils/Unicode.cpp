@@ -24,7 +24,7 @@
 # undef  nhtos
 # undef  htons
 
-# ifdef HAVE_LITTLE_ENDIAN
+# ifdef __LITTLE_ENDIAN__
 #  define ntohl(x)    ( ((x) << 24) | (((x) >> 24) & 255) | (((x) << 8) & 0xff0000) | (((x) >> 8) & 0xff00) )
 #  define htonl(x)    ntohl(x)
 #  define ntohs(x)    ( (((x) << 8) & 0xff00) | (((x) >> 8) & 255) )

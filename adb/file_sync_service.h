@@ -19,7 +19,7 @@
 
 #include <string>
 
-#ifdef HAVE_BIG_ENDIAN
+#ifdef __BIG_ENDIAN__
 static inline unsigned __swap_uint32(unsigned x) 
 {
     return (((x) & 0xFF000000) >> 24)

@@ -36,7 +36,7 @@
 #include "adb_io.h"
 #include "adb_utils.h"
 
-#ifdef HAVE_BIG_ENDIAN
+#ifdef __BIG_ENDIAN__
 #define H4(x)	(((x) & 0xFF000000) >> 24) | (((x) & 0x00FF0000) >> 8) | (((x) & 0x0000FF00) << 8) | (((x) & 0x000000FF) << 24)
 static inline void fix_endians(apacket *p)
 {
@@ -72,7 +72,7 @@ static int remote_read(apacket *p, atransport *t)
 
     fix_endians(p);
 
-#if 0 && defined HAVE_BIG_ENDIAN
+#if 0 && defined __BIG_ENDIAN__
     D("read remote packet: %04x arg0=%0x arg1=%0x data_length=%0x data_check=%0x magic=%0x\n",
       p->msg.command, p->msg.arg0, p->msg.arg1, p->msg.data_length, p->msg.data_check, p->msg.magic);
 #endif
@@ -100,7 +100,7 @@ static int remote_write(apacket *p, atransport *t)
 
     fix_endians(p);
 
-#if 0 && defined HAVE_BIG_ENDIAN
+#if 0 && defined __BIG_ENDIAN__
     D("write remote packet: %04x arg0=%0x arg1=%0x data_length=%0x data_check=%0x magic=%0x\n",
       p->msg.command, p->msg.arg0, p->msg.arg1, p->msg.data_length, p->msg.data_check, p->msg.magic);
 #endif
